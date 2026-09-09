@@ -1,0 +1,9 @@
+{
+  "name": "a2a-config",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}
