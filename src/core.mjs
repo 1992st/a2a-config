@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
@@ -80,23 +80,53 @@ export function readJsonFile(path, { required = false } = {}) {
 }
 
 export function readState(path = STATE_FILE) {
+  return readAppState(path).workspaces;
+}
+
+export function readAppState(path = STATE_FILE) {
+  if (!existsSync(path)) return { version: 3, workspaces: [], fileWorkspaces: [] };
+  let value;
   try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
-    if (!isRecord(value)) return [];
-    if (Array.isArray(value.workspaces)) {
-      return value.workspaces.filter((entry) => typeof entry === "string");
-    }
-  } catch {}
-  return [];
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`A2A Config 状态文件不是有效 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isRecord(value)) throw new Error("A2A Config 状态文件必须包含 JSON object");
+  return {
+    version: 3,
+    workspaces: Array.isArray(value.workspaces) ? value.workspaces.filter((entry) => typeof entry === "string") : [],
+    fileWorkspaces: Array.isArray(value.fileWorkspaces) ? value.fileWorkspaces.filter(isRecord) : [],
+  };
+}
+
+export function writeAppState(state, path = STATE_FILE) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeAtomically(path, `${JSON.stringify({
+    version: 3,
+    workspaces: [...new Set(state.workspaces || [])],
+    fileWorkspaces: Array.isArray(state.fileWorkspaces) ? state.fileWorkspaces : [],
+  }, null, 2)}\n`, 0o600);
+}
+
+export function updateAppState(update, path = STATE_FILE) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const release = acquireLocks([path]);
+  try {
+    const current = readAppState(path);
+    const next = update(structuredClone(current));
+    writeAppState(next, path);
+    return next;
+  } finally {
+    release();
+  }
 }
 
 export function writeState(workspaces, path = STATE_FILE) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const normalized = [...new Set(workspaces.map((entry) => {
     try { return normalizeWorkspacePath(entry); }
     catch { return resolve(entry); }
   }))];
-  writeAtomically(path, `${JSON.stringify({ version: 2, workspaces: normalized }, null, 2)}\n`, 0o600);
+  updateAppState((state) => ({ ...state, workspaces: normalized }), path);
 }
 
 export function addWorkspaceToState(workspace, path = STATE_FILE) {
@@ -625,7 +655,7 @@ export function findPiInstallations() {
     } catch {}
   };
   if (process.env.A2A_CONFIG_PI) add(process.env.A2A_CONFIG_PI, "environment");
-  for (const directory of String(process.env.PATH || "").split(sep)) {
+  for (const directory of String(process.env.PATH || "").split(delimiter)) {
     add(join(directory, process.platform === "win32" ? "pi.cmd" : "pi"), "path");
   }
   add(join(homedir(), ".npm-global", "bin", "pi"), "npm");

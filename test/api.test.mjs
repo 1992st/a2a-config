@@ -16,12 +16,39 @@ settings.packages = [...(settings.packages || []), process.argv[3]];
 writeFileSync(path, JSON.stringify(settings, null, 2) + "\\n");
 `);
   chmodSync(fakePi, 0o755);
+  const fakeRclone = join(root, "rclone");
+  writeFileSync(fakeRclone, `#!/usr/bin/env node
+import { createServer } from "node:net";
+if (process.argv[2] === "version") { console.log("rclone vtest"); process.exit(0); }
+if (process.argv[2] === "serve") {
+  if (!process.env.RCLONE_USER || !process.env.RCLONE_PASS) process.exit(2);
+  if (process.env.OPENAI_API_KEY || process.env.A2A_CONFIG_ADMIN_TOKEN) process.exit(3);
+  const address = process.argv[process.argv.indexOf("--addr") + 1];
+  const port = Number(address.split(":").at(-1));
+  const server = createServer();
+  server.listen(port, "127.0.0.1");
+  process.on("SIGTERM", () => server.close(() => process.exit(0)));
+}
+`);
+  chmodSync(fakeRclone, 0o755);
+  const fakeSshKeygen = join(root, "ssh-keygen");
+  writeFileSync(fakeSshKeygen, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+const output = process.argv[process.argv.indexOf("-f") + 1];
+if (process.argv.includes("-lf")) console.log("256 SHA256:test-fingerprint host (ED25519)");
+else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh-ed25519 AAAATEST host\\n"); }
+`);
+  chmodSync(fakeSshKeygen, 0o755);
   const server = spawn(process.execPath, [resolve("src/server.mjs"), "--plugin-source", "/plugins/zhangst_a2a-pi"], {
     cwd: resolve("."),
     env: {
       ...process.env,
       A2A_CONFIG_PI: fakePi,
+      A2A_CONFIG_RCLONE: fakeRclone,
+      A2A_CONFIG_SSH_KEYGEN: fakeSshKeygen,
       A2A_CONFIG_STATE_FILE: join(root, "state.json"),
+      OPENAI_API_KEY: "must-not-reach-rclone",
+      A2A_CONFIG_ADMIN_TOKEN: "must-not-reach-rclone",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -179,6 +206,62 @@ test("outgoing connections can be edited, renamed, and deleted", async () => {
     assert.equal(removeApply.body.ok, true);
     assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).a2a.peers.new, undefined);
     assert.doesNotMatch(readFileSync(envPath, "utf8"), /new-token|"new"/);
+  } finally {
+    client.stop();
+  }
+});
+
+test("file workspace lifecycle and agent query use independent state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-files-"));
+  const agentWorkspace = join(root, "agent");
+  const fileRoot = join(root, "shared-files");
+  mkdirSync(agentWorkspace);
+  mkdirSync(fileRoot);
+  const client = await startTestServer(root);
+  try {
+    const started = await client.request("/api/workspaces", { method: "POST", body: JSON.stringify({ path: agentWorkspace }) });
+    assert.equal((await waitForOperation(client, started.body.id)).status, "complete");
+    const state = await client.request("/api/state");
+    const agent = state.body.workspaces[0];
+    const inspected = await client.request("/api/file-workspaces/inspect", { method: "POST", body: JSON.stringify({ root: fileRoot }) });
+    assert.equal(inspected.response.status, 200);
+    assert.equal(inspected.body.dependencies.ready, true);
+
+    const created = await client.request("/api/file-workspaces", {
+      method: "POST",
+      body: JSON.stringify({
+        root: fileRoot,
+        name: "共享文件",
+        username: "shared-files",
+        password: "plain-password",
+        port: inspected.body.suggestedPort,
+        publicUrl: `sftp://127.0.0.1:${inspected.body.suggestedPort}`,
+        boundAgentKeys: [agent.key],
+      }),
+    });
+    assert.equal(created.response.status, 201, JSON.stringify(created.body));
+    assert.match(created.body.id, /^files-shared-files-[a-f0-9]{10}$/);
+    let files;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      files = await client.request("/api/file-workspaces");
+      if (files.body.fileWorkspaces[0]?.status.state === "running") break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    }
+    assert.equal(files.body.fileWorkspaces[0].status.state, "running");
+
+    const info = await client.request(`/api/agent/file-workspaces?agentId=${agent.instanceId}`);
+    assert.equal(info.body.fileWorkspaces[0].password, "plain-password");
+    assert.equal(info.body.fileWorkspaces[0].hostPublicKey, "ssh-ed25519 AAAATEST");
+
+    const disabled = await client.request(`/api/file-workspaces/${created.body.id}/disable`, { method: "POST", body: "{}" });
+    assert.equal(disabled.body.enabled, false);
+    const invalidRestart = await client.request(`/api/file-workspaces/${created.body.id}/restart`, { method: "POST", body: "{}" });
+    assert.equal(invalidRestart.response.status, 400);
+    assert.match(invalidRestart.body.error.message, /请先启用/);
+    const afterDisable = await client.request(`/api/agent/file-workspaces?agentId=${agent.instanceId}`);
+    assert.deepEqual(afterDisable.body.fileWorkspaces, []);
+    const persisted = JSON.parse(readFileSync(join(root, "state.json"), "utf8"));
+    assert.equal(persisted.fileWorkspaces.length, 1);
   } finally {
     client.stop();
   }

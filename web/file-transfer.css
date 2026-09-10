@@ -1,0 +1,30 @@
+.module-switch {
+  flex: 0 0 auto;
+}
+
+.module-button {
+  white-space: nowrap;
+}
+
+.header-actions .button,
+.page-actions .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.button svg {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 639px) {
+  .header-create {
+    width: 36px;
+    padding: 7px;
+  }
+
+  .header-create span {
+    display: none;
+  }
+}

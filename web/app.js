@@ -1,5 +1,10 @@
 const state = {
+  module: "agents",
   workspaces: [],
+  fileWorkspaces: [],
+  selectedFileId: null,
+  fileDependencies: null,
+  fileInspection: null,
   selectedKey: null,
   tab: "server",
   draft: null,
@@ -12,6 +17,7 @@ const state = {
 };
 
 const $ = (selector) => document.querySelector(selector);
+const refreshIcons = () => window.lucide?.createIcons({ attrs: { width: 16, height: 16, "stroke-width": 2 } });
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[character]);
@@ -37,6 +43,17 @@ function notify(message) {
 
 function selectedWorkspace() {
   return state.workspaces.find((workspace) => workspace.key === state.selectedKey);
+}
+
+function selectedFileWorkspace() {
+  return state.fileWorkspaces.find((workspace) => workspace.id === state.selectedFileId);
+}
+
+function fileStatusLabel(status) {
+  return {
+    starting: "启动中", running: "运行中", retrying: "自动重试",
+    failed: "启动失败", stopped: "已停用", "dependency-missing": "rclone 未安装", "port-conflict": "端口冲突",
+  }[status?.state] || "已停用";
 }
 
 function hasConfiguredConnection(workspace) {
@@ -101,6 +118,48 @@ function renderWorkspaceList() {
   }));
 }
 
+function renderFileWorkspaceList() {
+  const list = $("#workspace-list");
+  if (!state.fileWorkspaces.length) {
+    list.innerHTML = '<div class="empty">还没有文件空间</div>';
+    return;
+  }
+  list.innerHTML = state.fileWorkspaces.map((workspace) => {
+    const failed = workspace.status?.state === "failed" || workspace.status?.state === "dependency-missing";
+    const warning = workspace.status?.state === "retrying";
+    return `<button class="workspace-item ${workspace.id === state.selectedFileId ? "active" : ""}" type="button" data-file-workspace="${workspace.id}">
+      <span class="dot ${workspace.status?.state === "running" ? "running" : ""}"></span>
+      <span><span class="workspace-name">${escapeHtml(workspace.name)}</span><span class="workspace-path">${escapeHtml(workspace.root)}</span></span>
+      ${failed ? `<span class="error-icon" title="${escapeHtml(workspace.status.error || fileStatusLabel(workspace.status))}">!</span>` : warning ? '<span class="warning-icon" title="正在自动重试">!</span>' : ""}
+    </button>`;
+  }).join("");
+  list.querySelectorAll("[data-file-workspace]").forEach((button) => button.addEventListener("click", () => {
+    state.selectedFileId = button.dataset.fileWorkspace;
+    closeNavigation();
+    render();
+  }));
+}
+
+function agentOptions(selectedKeys) {
+  if (!state.workspaces.length) return '<div class="empty compact">请先在 Agent 配置中添加工作目录。</div>';
+  return state.workspaces.filter((agent) => !agent.error).map((agent) => `<label class="check-row"><input type="checkbox" value="${agent.key}" ${selectedKeys.includes(agent.key) ? "checked" : ""}><span><strong>${escapeHtml(agent.agentName)}</strong><small>${escapeHtml(agent.workspace)}</small></span></label>`).join("");
+}
+
+function fileWorkspaceView(workspace) {
+  const status = workspace.status || {};
+  const running = status.state === "running";
+  return `<header class="page-header"><div><h1>${escapeHtml(workspace.name)}</h1><p class="path">${escapeHtml(workspace.root)}</p></div><div class="page-actions"><button class="button" id="file-restart" type="button" ${workspace.enabled ? "" : "disabled"}><i data-lucide="rotate-cw"></i><span>重新启动</span></button><button class="button ${workspace.enabled ? "danger" : "primary"}" id="file-toggle" type="button"><i data-lucide="${workspace.enabled ? "square" : "play"}"></i><span>${workspace.enabled ? "停用" : "启用"}</span></button></div></header>
+    <section class="status-panel ${running ? "running" : status.state === "failed" ? "error" : status.state === "retrying" ? "warning" : ""}" role="status" aria-live="polite"><div><strong class="status-title">${escapeHtml(fileStatusLabel(status))}</strong><p class="status-detail">${escapeHtml(workspace.publicUrl)}${status.pid ? ` · PID ${status.pid}` : ""}</p></div></section>
+    ${status.error ? `<div class="notice error">${escapeHtml(status.error)}</div>` : ""}
+    ${!state.fileDependencies?.ready ? `<div class="notice error">缺少文件传输依赖。安装后点击刷新。<pre>${escapeHtml(state.fileDependencies?.install || "请安装 rclone")}</pre></div>` : ""}
+    <form id="file-workspace-form" autocomplete="off">
+      <section class="section"><div class="section-header"><div><h2>目录</h2><p class="section-description">该目录是 SFTP 根目录。</p></div></div><div class="form-grid"><div class="field"><label for="edit-file-name">文件空间名称</label><input class="control" id="edit-file-name" maxlength="80" value="${escapeHtml(workspace.name)}"></div><div class="field"><label>Host key 指纹</label><output class="control output-control mono">${escapeHtml(workspace.fingerprint)}</output></div><div class="field full"><label>根目录</label><output class="control output-control mono">${escapeHtml(workspace.root)}</output></div></div></section>
+      <section class="section"><div class="section-header"><div><h2>关联 Agent</h2><p class="section-description">已关联 Agent 可以查询并使用该文件空间。</p></div></div><fieldset class="agent-fieldset"><legend class="sr-only">关联 Agent</legend><div class="agent-options" id="edit-file-agents">${agentOptions(workspace.boundAgentKeys)}</div></fieldset></section>
+      <section class="section"><details><summary>高级设置</summary><div class="form-grid advanced-fields"><div class="field"><label for="edit-file-listen-host">监听地址</label><input class="control mono" id="edit-file-listen-host" value="${escapeHtml(workspace.listenHost)}"></div><div class="field"><label for="edit-file-port">端口</label><input class="control mono" id="edit-file-port" type="number" min="1" max="65535" value="${workspace.port}"></div><div class="field full"><label for="edit-file-public-url">对外地址</label><input class="control mono" id="edit-file-public-url" value="${escapeHtml(workspace.publicUrl)}"></div><div class="field"><label for="edit-file-username">SFTP 用户名</label><input class="control mono" id="edit-file-username" value="${escapeHtml(workspace.username)}" autocomplete="off"></div><div class="field"><label for="edit-file-password">SFTP 密码</label><div class="input-action"><input class="control mono" id="edit-file-password" type="password" maxlength="1024" value="${escapeHtml(workspace.password)}" autocomplete="new-password"><button class="icon-button password-toggle" type="button" aria-label="显示密码" title="显示密码"><i data-lucide="eye"></i></button><button class="icon-button" id="copy-file-password" type="button" aria-label="复制密码" title="复制密码"><i data-lucide="copy"></i></button></div></div></div></details></section>
+      <div class="inline-save"><button class="button primary" type="submit">保存文件空间</button></div>
+    </form>`;
+}
+
 function effectiveDraft(workspace) {
   return {
     instanceId: state.draft?.instanceId ?? workspace.instanceId,
@@ -147,6 +206,26 @@ function incomingView(workspace) {
 }
 
 function render() {
+  $("#module-agents").classList.toggle("active", state.module === "agents");
+  $("#module-files").classList.toggle("active", state.module === "files");
+  $("#add-workspace").classList.toggle("hidden", state.module !== "agents");
+  $("#add-file-workspace").classList.toggle("hidden", state.module !== "files");
+  $("#open-nav").setAttribute("aria-label", state.module === "agents" ? "打开工作目录列表" : "打开文件空间列表");
+  $(".sidebar-title").textContent = state.module === "agents" ? "工作目录" : "文件空间";
+  $("#workspace-list").setAttribute("aria-label", state.module === "agents" ? "已管理工作目录" : "文件空间列表");
+  if (state.module === "files") {
+    renderFileWorkspaceList();
+    $("#save-bar").classList.remove("show");
+    const content = $("#main-content");
+    const workspace = selectedFileWorkspace();
+    content.innerHTML = workspace
+      ? fileWorkspaceView(workspace)
+      : '<div class="empty"><h1>创建第一个文件空间</h1><p>选择一个现有目录并关联本地 Agent。</p><button class="button primary" id="empty-add-file" type="button">创建文件空间</button></div>';
+    $("#empty-add-file")?.addEventListener("click", openFileWorkspaceDialog);
+    if (workspace) bindFileWorkspaceEvents(workspace);
+    refreshIcons();
+    return;
+  }
   renderWorkspaceList();
   const workspace = selectedWorkspace();
   const content = $("#main-content");
@@ -174,6 +253,60 @@ function render() {
     <nav class="tabs" role="tablist" aria-label="A2A 配置"><button class="tab ${state.tab === "server" ? "active" : ""}" data-tab="server" role="tab" type="button">Server</button><button class="tab ${state.tab === "outgoing" ? "active" : ""}" data-tab="outgoing" role="tab" type="button">连接其他 Pi</button><button class="tab ${state.tab === "incoming" ? "active" : ""}" data-tab="incoming" role="tab" type="button">允许其他 Pi 连接</button></nav>
     <div id="tab-content">${state.tab === "server" ? serverView(workspace) : state.tab === "outgoing" ? outgoingView(workspace) : incomingView(workspace)}</div>`;
   bindWorkspaceEvents(workspace);
+  refreshIcons();
+}
+
+function checkedAgentKeys(container) {
+  return [...container.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value);
+}
+
+function bindPasswordToggle(scope = document) {
+  scope.querySelectorAll(".password-toggle").forEach((button) => button.addEventListener("click", () => {
+    const input = button.parentElement.querySelector("input");
+    const visible = input.type === "text";
+    input.type = visible ? "password" : "text";
+    button.setAttribute("aria-label", visible ? "显示密码" : "隐藏密码");
+    button.title = visible ? "显示密码" : "隐藏密码";
+    button.innerHTML = `<i data-lucide="${visible ? "eye" : "eye-off"}"></i>`;
+    refreshIcons();
+  }));
+}
+
+function bindFileWorkspaceEvents(workspace) {
+  bindPasswordToggle($("#main-content"));
+  $("#copy-file-password")?.addEventListener("click", () => copyText($("#edit-file-password").value, "密码已复制"));
+  $("#file-toggle")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/file-workspaces/${workspace.id}/${workspace.enabled ? "disable" : "enable"}`, { method: "POST", body: "{}" });
+      await loadFileWorkspaces();
+    } catch (error) { notify(error.message); }
+  });
+  $("#file-restart")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/file-workspaces/${workspace.id}/restart`, { method: "POST", body: "{}" });
+      notify("正在重新启动文件空间");
+      await loadFileWorkspaces();
+    } catch (error) { notify(error.message); }
+  });
+  $("#file-workspace-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await api(`/api/file-workspaces/${workspace.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: $("#edit-file-name").value.trim(),
+          listenHost: $("#edit-file-listen-host").value.trim(),
+          port: Number($("#edit-file-port").value),
+          publicUrl: $("#edit-file-public-url").value.trim(),
+          username: $("#edit-file-username").value.trim(),
+          password: $("#edit-file-password").value,
+          boundAgentKeys: checkedAgentKeys($("#edit-file-agents")),
+        }),
+      });
+      notify("文件空间已保存");
+      await loadFileWorkspaces();
+    } catch (error) { notify(error.message); }
+  });
 }
 
 function mergeDraft(patch) {
@@ -332,6 +465,48 @@ function openWorkspaceDialog() {
   $("#workspace-dialog").showModal();
 }
 
+function openFileWorkspaceDialog() {
+  state.fileInspection = null;
+  $("#file-root").value = "";
+  $("#file-inspection").classList.add("hidden");
+  $("#file-create-fields").classList.add("hidden");
+  setFileCreateFieldsEnabled(false);
+  $("#file-workspace-submit").textContent = "检查目录";
+  $("#file-workspace-dialog").showModal();
+}
+
+function setFileCreateFieldsEnabled(enabled) {
+  $("#file-create-fields").querySelectorAll("input, button").forEach((control) => { control.disabled = !enabled; });
+}
+
+function renderFileInspection(inspection) {
+  const target = $("#file-inspection");
+  target.classList.remove("hidden");
+  if (inspection.duplicateId) {
+    const existing = state.fileWorkspaces.find((workspace) => workspace.id === inspection.duplicateId);
+    target.innerHTML = `<div class="notice error">该目录已经属于“${escapeHtml(existing?.name || inspection.duplicateId)}”。</div><button class="button" id="show-duplicate-file-workspace" type="button">查看已有项</button>`;
+    $("#show-duplicate-file-workspace").addEventListener("click", () => {
+      state.selectedFileId = inspection.duplicateId;
+      $("#file-workspace-dialog").close();
+      render();
+    });
+    return;
+  }
+  target.innerHTML = `<strong>${escapeHtml(inspection.root)}</strong><br>目录：可读写<br>rclone：${inspection.dependencies.rclonePath ? "已安装" : "未安装"}<br>ssh-keygen：${inspection.dependencies.sshKeygenPath ? "已安装" : "未安装"}${inspection.dependencies.ready ? "" : `<pre>${escapeHtml(inspection.dependencies.install)}</pre>`}${inspection.hosts.length ? "" : '<div class="notice">无法自动判断其他电脑可访问的地址，请在高级设置中填写对外地址。</div>'}`;
+  $("#file-name").value = inspection.name;
+  $("#file-username").value = inspection.username;
+  $("#file-password").value = "";
+  $("#file-port").value = inspection.suggestedPort;
+  $("#file-public-url").value = inspection.hosts[0] ? `sftp://${inspection.hosts[0].host}:${inspection.suggestedPort}` : "";
+  $("#file-agent-options").innerHTML = agentOptions([]);
+  $("#file-create-fields").classList.remove("hidden");
+  $("#file-create-fields details").open = inspection.hosts.length === 0;
+  setFileCreateFieldsEnabled(true);
+  bindPasswordToggle($("#file-workspace-dialog"));
+  $("#copy-file-create-password").onclick = () => copyText($("#file-password").value, "密码已复制");
+  refreshIcons();
+}
+
 function renderInspection(inspection) {
   const target = $("#workspace-inspection");
   target.classList.remove("hidden");
@@ -369,20 +544,33 @@ async function pollOperation(id) {
 
 async function loadState() {
   try {
-    const payload = await api("/api/state");
+    const [payload, files] = await Promise.all([api("/api/state"), api("/api/file-workspaces")]);
     state.workspaces = payload.workspaces;
+    state.fileWorkspaces = files.fileWorkspaces;
+    state.fileDependencies = files.dependencies;
     if (!selectedWorkspace()) state.selectedKey = state.workspaces[0]?.key || null;
+    if (!selectedFileWorkspace()) state.selectedFileId = state.fileWorkspaces[0]?.id || null;
     $("#refreshed-at").textContent = `刷新于 ${new Date().toLocaleTimeString()}`;
     render();
   } catch (error) { notify(error.message); }
 }
 
+async function loadFileWorkspaces() {
+  const payload = await api("/api/file-workspaces");
+  state.fileWorkspaces = payload.fileWorkspaces;
+  state.fileDependencies = payload.dependencies;
+  if (!selectedFileWorkspace()) state.selectedFileId = state.fileWorkspaces[0]?.id || null;
+  render();
+}
+
 async function refreshPortStatus() {
   try {
-    const payload = await api("/api/port-status");
+    const [payload, files] = await Promise.all([api("/api/port-status"), api("/api/file-workspaces/status")]);
     const byKey = new Map(payload.statuses.map((status) => [status.key, status]));
     const runtimeByKey = new Map(payload.runtimeStatuses.map((status) => [status.key, status]));
     state.workspaces = state.workspaces.map((workspace) => ({ ...workspace, portStatus: byKey.get(workspace.key) || workspace.portStatus, runtimeStatus: runtimeByKey.get(workspace.key) || workspace.runtimeStatus }));
+    const fileStatusById = new Map(files.statuses.map((status) => [status.id, status]));
+    state.fileWorkspaces = state.fileWorkspaces.map((workspace) => ({ ...workspace, status: fileStatusById.get(workspace.id) || workspace.status }));
     $("#refreshed-at").textContent = `端口状态 ${new Date(payload.refreshedAt).toLocaleTimeString()}`;
     render();
   } catch (error) { notify(error.message); }
@@ -399,6 +587,9 @@ function closeNavigation() {
 }
 
 $("#add-workspace").addEventListener("click", openWorkspaceDialog);
+$("#add-file-workspace").addEventListener("click", openFileWorkspaceDialog);
+$("#module-agents").addEventListener("click", () => { state.module = "agents"; closeNavigation(); render(); });
+$("#module-files").addEventListener("click", () => { state.module = "files"; closeNavigation(); render(); });
 $("#refresh").addEventListener("click", loadState);
 $("#open-nav").addEventListener("click", () => { $("#sidebar").classList.add("open"); $("#nav-scrim").classList.add("open"); });
 $("#nav-scrim").addEventListener("click", closeNavigation);
@@ -439,6 +630,54 @@ $("#workspace-path").addEventListener("input", () => {
   $("#workspace-inspection").classList.add("hidden");
   $("#workspace-operation").classList.add("hidden");
   $("#workspace-submit").textContent = "检查目录";
+});
+
+$("#file-root").addEventListener("input", () => {
+  state.fileInspection = null;
+  $("#file-inspection").classList.add("hidden");
+  $("#file-create-fields").classList.add("hidden");
+  setFileCreateFieldsEnabled(false);
+  $("#file-workspace-submit").textContent = "检查目录";
+});
+
+$("#file-port").addEventListener("input", () => {
+  if (!state.fileInspection?.hosts[0]) return;
+  $("#file-public-url").value = `sftp://${state.fileInspection.hosts[0].host}:${$("#file-port").value}`;
+});
+
+$("#file-workspace-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("#file-workspace-submit");
+  button.disabled = true;
+  try {
+    if (!state.fileInspection) {
+      state.fileInspection = await api("/api/file-workspaces/inspect", { method: "POST", body: JSON.stringify({ root: $("#file-root").value }) });
+      renderFileInspection(state.fileInspection);
+      button.textContent = "创建并启动";
+      button.disabled = Boolean(state.fileInspection.duplicateId || !state.fileInspection.dependencies.ready);
+      return;
+    }
+    const boundAgentKeys = checkedAgentKeys($("#file-agent-options"));
+    if (!boundAgentKeys.length) throw new Error("请至少关联一个 Agent");
+    const created = await api("/api/file-workspaces", {
+      method: "POST",
+      body: JSON.stringify({
+        root: state.fileInspection.root,
+        name: $("#file-name").value.trim(),
+        username: $("#file-username").value.trim(),
+        password: $("#file-password").value,
+        listenHost: $("#file-listen-host").value.trim(),
+        port: Number($("#file-port").value),
+        publicUrl: $("#file-public-url").value.trim(),
+        boundAgentKeys,
+      }),
+    });
+    state.selectedFileId = created.id;
+    $("#file-workspace-dialog").close();
+    notify("文件空间已创建，正在启动");
+    await loadFileWorkspaces();
+  } catch (error) { notify(error.message); }
+  finally { if ($("#file-workspace-dialog").open && !state.fileInspection?.duplicateId && state.fileInspection?.dependencies.ready) button.disabled = false; }
 });
 
 $("#connection-form").addEventListener("submit", (event) => {

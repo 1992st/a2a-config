@@ -3,36 +3,79 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>A2A Config 工作目录原型</title>
+  <title>A2A Config 文件传输原型</title>
   <link rel="stylesheet" href="../web/styles.css">
+  <link rel="stylesheet" href="../web/file-transfer.css">
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark">A2A</span><strong>A2A Config</strong></div>
-    <div class="header-actions"><span>端口状态 10:30:00</span><button class="button">刷新</button><button class="button primary">添加工作目录</button></div>
+    <div class="brand"><span class="brand-mark">A2A</span><strong>A2A Config</strong><nav class="module-switch" aria-label="功能模块"><button class="module-button">Agent 配置</button><button class="module-button active">文件传输</button></nav></div>
+    <div class="header-actions"><span>状态 10:30:00</span><button class="button" id="cycle-state" type="button">刷新</button><button class="button primary" id="create-space" type="button">创建文件空间</button></div>
   </header>
   <div class="layout">
-    <aside class="sidebar">
-      <div class="sidebar-title">工作目录</div>
-      <button class="workspace-item active"><span class="dot running"></span><span><span class="workspace-name">win-stock</span><span class="workspace-path">/work/win-stock</span></span></button>
-      <button class="workspace-item"><span class="dot"></span><span><span class="workspace-name">research-agent</span><span class="workspace-path">/work/research-agent</span></span><span class="warning-icon" title="配置端口 9910 与 win-stock 重复">!</span></button>
-    </aside>
+    <aside class="sidebar"><div class="sidebar-title">文件空间</div><button class="workspace-item active"><span class="dot running"></span><span><span class="workspace-name">audio-files</span><span class="workspace-path">/data/audio</span></span></button><button class="workspace-item"><span class="dot"></span><span><span class="workspace-name">reports</span><span class="workspace-path">/data/reports</span></span><span class="warning-icon" title="SFTP 端口被占用">!</span></button></aside>
     <main>
-      <header class="page-header"><div><h1>win-stock</h1><p class="path">/work/win-stock</p></div><button class="button">复制启动命令</button></header>
-      <section class="status-panel running"><div><strong class="status-title">已配置连接</strong><p class="status-detail">已配置其他 Pi 1 个 · Server 运行于端口 9910</p></div><button class="button">关闭 Server</button></section>
-      <nav class="tabs"><button class="tab active">Server</button><button class="tab">连接其他 Pi</button><button class="tab">允许其他 Pi 连接</button></nav>
-      <section class="section">
-        <div class="section-header"><div><h2>Server 配置</h2><p class="section-description">状态和端口冲突优先显示；其余参数按需调整。</p></div></div>
-        <div class="form-grid">
-          <div class="field"><label>instanceId</label><input class="control mono" value="win-stock"></div>
-          <div class="field"><label>Agent 名称</label><input class="control" value="win-stock"></div>
-          <div class="field"><label>监听地址</label><select class="control mono"><option>0.0.0.0</option></select></div>
-          <div class="field"><label>端口</label><input class="control mono" value="9910"><p class="field-help">未发现其他受管 Pi 使用该端口</p></div>
-          <div class="field"><label>备用端口数量</label><input class="control mono" value="10"></div>
-          <div class="field"><label>对外地址</label><input class="control mono" placeholder="自动"></div>
-        </div>
-      </section>
+      <header class="page-header"><div><h1>audio-files</h1><p class="path">/data/audio</p></div><div class="page-actions"><button class="button" id="restart" type="button">重新启动</button><button class="button danger" id="toggle" type="button">停用</button></div></header>
+      <section class="status-panel running" id="transfer-status" role="status"><div><strong class="status-title">运行中</strong><p class="status-detail">sftp://100.64.0.12:2022 · PID 18420</p></div></section>
+      <form>
+        <section class="section"><div class="section-header"><div><h2>目录</h2><p class="section-description">该目录是 SFTP 根目录。</p></div></div><div class="form-grid"><div class="field"><label>文件空间名称</label><input class="control" value="audio-files"></div><div class="field"><label>Host key 指纹</label><output class="control output-control mono">SHA256:example</output></div><div class="field full"><label>根目录</label><output class="control output-control mono">/data/audio</output></div></div></section>
+        <section class="section"><div class="section-header"><div><h2>关联 Agent</h2><p class="section-description">这些 Agent 可以查询并使用该文件空间。</p></div></div><fieldset class="agent-fieldset"><div class="agent-options"><label class="check-row"><input type="checkbox" checked><span><strong>audio-agent</strong><small>/work/audio-agent</small></span></label><label class="check-row"><input type="checkbox" checked><span><strong>report-agent</strong><small>/work/report-agent</small></span></label></div></fieldset></section>
+        <section class="section"><details><summary>高级设置</summary><div class="form-grid advanced-fields"><div class="field"><label>监听地址</label><input class="control mono" value="0.0.0.0"></div><div class="field"><label>端口</label><input class="control mono" value="2022"></div><div class="field"><label>SFTP 用户名</label><input class="control mono" value="audio"></div><div class="field"><label for="prototype-password">SFTP 密码</label><div class="input-action"><input class="control mono" id="prototype-password" type="password" value="example-password"><button class="icon-button" id="show-password" type="button" aria-label="显示密码">查看</button></div></div></div></details></section>
+      </form>
     </main>
   </div>
+  <dialog id="create-dialog">
+    <form class="dialog-shell" id="create-form">
+      <header class="dialog-header"><div><h2>创建文件空间</h2><p>选择目录并关联可以使用它的 Agent。</p></div><button class="icon-button" id="close-dialog" type="button" aria-label="关闭">×</button></header>
+      <div class="dialog-body"><label for="prototype-root">现有目录</label><input class="control mono" id="prototype-root" value="/data/reports" required><label for="prototype-name">文件空间名称</label><input class="control" id="prototype-name" value="reports" required><label for="prototype-create-password">SFTP 密码</label><input class="control mono" id="prototype-create-password" type="password" value="example-password" required><fieldset><legend>关联 Agent</legend><div class="agent-options"><label class="check-row"><input type="checkbox" checked><span><strong>audio-agent</strong></span></label><label class="check-row"><input type="checkbox" checked><span><strong>report-agent</strong></span></label></div></fieldset></div>
+      <footer class="dialog-footer"><button class="button" id="cancel-dialog" type="button">取消</button><button class="button primary" type="submit">创建并启动</button></footer>
+    </form>
+  </dialog>
+  <script>
+    const statusPanel = document.querySelector("#transfer-status");
+    const statusTitle = statusPanel.querySelector(".status-title");
+    const statusDetail = statusPanel.querySelector(".status-detail");
+    const states = [
+      ["运行中", "sftp://100.64.0.12:2022 · PID 18420", "running"],
+      ["端口冲突", "端口 2022 已被占用，建议使用 2023", "warning"],
+      ["rclone 未安装", "brew install rclone", "error"],
+    ];
+    let stateIndex = 0;
+    function showState(index) {
+      stateIndex = index;
+      const [title, detail, kind] = states[index];
+      statusTitle.textContent = title;
+      statusDetail.textContent = detail;
+      statusPanel.className = `status-panel ${kind}`;
+    }
+    document.querySelector("#cycle-state").addEventListener("click", () => showState((stateIndex + 1) % states.length));
+    document.querySelector("#restart").addEventListener("click", () => {
+      statusTitle.textContent = "启动中";
+      statusDetail.textContent = "正在重新启动 rclone";
+      statusPanel.className = "status-panel";
+      setTimeout(() => showState(0), 600);
+    });
+    document.querySelector("#toggle").addEventListener("click", (event) => {
+      const stopped = event.currentTarget.textContent === "启用";
+      event.currentTarget.textContent = stopped ? "停用" : "启用";
+      statusTitle.textContent = stopped ? "运行中" : "已停用";
+      statusDetail.textContent = stopped ? states[0][1] : "配置、目录、密码和 Agent 绑定均已保留";
+      statusPanel.className = stopped ? "status-panel running" : "status-panel";
+    });
+    document.querySelector("#show-password").addEventListener("click", (event) => {
+      const input = document.querySelector("#prototype-password");
+      input.type = input.type === "password" ? "text" : "password";
+      event.currentTarget.textContent = input.type === "password" ? "查看" : "隐藏";
+    });
+    const dialog = document.querySelector("#create-dialog");
+    document.querySelector("#create-space").addEventListener("click", () => dialog.showModal());
+    document.querySelector("#close-dialog").addEventListener("click", () => dialog.close());
+    document.querySelector("#cancel-dialog").addEventListener("click", () => dialog.close());
+    document.querySelector("#create-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      dialog.close();
+      showState(0);
+    });
+  </script>
 </body>
 </html>

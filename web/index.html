@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>A2A Config</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/file-transfer.css">
 </head>
 <body>
   <div id="app">
@@ -12,11 +13,12 @@
       <div class="brand">
         <button class="icon-button mobile-only" id="open-nav" type="button" aria-label="打开工作目录列表">☰</button>
         <span class="brand-mark">A2A</span><strong>A2A Config</strong>
+        <nav class="module-switch" aria-label="功能模块"><button class="module-button active" id="module-agents" type="button">Agent 配置</button><button class="module-button" id="module-files" type="button">文件传输</button></nav>
       </div>
       <div class="header-actions">
         <span id="refreshed-at"></span>
-        <button class="button" id="refresh" type="button">刷新</button>
-        <button class="button primary" id="add-workspace" type="button">添加工作目录</button>
+        <button class="button" id="refresh" type="button"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
+        <button class="button primary header-create" id="add-workspace" type="button" title="添加工作目录"><i data-lucide="plus"></i><span>添加工作目录</span></button><button class="button primary header-create hidden" id="add-file-workspace" type="button" title="创建文件空间"><i data-lucide="plus"></i><span>创建文件空间</span></button>
       </div>
     </header>
     <button class="nav-scrim" id="nav-scrim" type="button" aria-label="关闭工作目录列表"></button>
@@ -41,6 +43,24 @@
       <header class="dialog-header"><div><h2 id="connection-title"></h2><p id="connection-description"></p></div><button class="icon-button" data-close type="button" aria-label="关闭">×</button></header>
       <div class="dialog-body" id="connection-fields"></div>
       <footer class="dialog-footer"><button class="button" data-close type="button">取消</button><button class="button primary" id="connection-submit" type="submit">添加</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="file-workspace-dialog">
+    <form class="dialog-shell" id="file-workspace-create-form" autocomplete="off">
+      <header class="dialog-header"><div><h2>创建文件空间</h2><p>选择目录并关联可以使用它的 Agent。</p></div><button class="icon-button" data-close type="button" aria-label="关闭">×</button></header>
+      <div class="dialog-body">
+        <label for="file-root">现有目录</label><input class="control mono" id="file-root" required placeholder="/path/to/files">
+        <div class="inspection hidden" id="file-inspection"></div>
+        <div class="file-create-fields hidden" id="file-create-fields">
+          <label for="file-name">文件空间名称</label><input class="control" id="file-name" required maxlength="80">
+          <label for="file-username">SFTP 用户名</label><input class="control mono" id="file-username" required maxlength="64" autocomplete="off">
+          <label for="file-password">SFTP 密码</label><div class="input-action"><input class="control mono" id="file-password" type="password" required maxlength="1024" autocomplete="new-password"><button class="icon-button password-toggle" type="button" aria-label="显示密码" title="显示密码"><i data-lucide="eye"></i></button><button class="icon-button" id="copy-file-create-password" type="button" aria-label="复制密码" title="复制密码"><i data-lucide="copy"></i></button></div>
+          <fieldset><legend>关联 Agent</legend><div class="agent-options" id="file-agent-options"></div></fieldset>
+          <details><summary>高级设置</summary><div class="form-grid advanced-fields"><div class="field"><label for="file-listen-host">监听地址</label><input class="control mono" id="file-listen-host" value="0.0.0.0"></div><div class="field"><label for="file-port">端口</label><input class="control mono" id="file-port" type="number" min="1" max="65535"></div><div class="field full"><label for="file-public-url">对外地址</label><input class="control mono" id="file-public-url" required></div></div></details>
+        </div>
+      </div>
+      <footer class="dialog-footer"><button class="button" data-close type="button">取消</button><button class="button primary" id="file-workspace-submit" type="submit">检查目录</button></footer>
     </form>
   </dialog>
 
@@ -75,6 +95,7 @@
       <footer class="dialog-footer"><button class="button" data-close type="button">关闭</button><button class="button primary" id="copy-prompt" type="button">复制 Prompt</button></footer>
     </div>
   </dialog>
+  <script src="/vendor/lucide.js"></script>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

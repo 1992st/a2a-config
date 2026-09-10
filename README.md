@@ -70,6 +70,33 @@ cd <workspace> && PI_CODING_AGENT_DIR=<workspace>/.pi/agent pi
 
 顶部显示工作区整体状态：存在出站 peer、入站连接方或已启用 Server 时显示“已配置连接”；这只表示配置存在，远端在线情况由“验证远端”单独检查。
 
+## 文件传输
+
+顶栏“文件传输”模块管理独立文件空间。每个文件空间选择一个任意现有目录，并可关联多个本地 Agent；同一 Agent 可以关联多个文件空间。
+
+底层使用 `rclone serve sftp`。创建时名称和用户名默认目录名，用户填写并保存明文密码，端口从 `2022` 开始自动选择。创建后立即启动；A2A Config 退出时停止，重新启动时恢复 enabled 文件空间。
+
+工具不会自动安装依赖：
+
+```bash
+# macOS
+brew install rclone
+
+# Windows
+winget install Rclone.Rclone
+
+# Debian/Ubuntu
+sudo apt install rclone openssh-client
+```
+
+关联 Agent 可通过本机接口查询连接信息；已认证远端 A2A Agent 可调用 `GetFileTransferInfo`。插件提供 `file_transfer_info`、`a2a_file_transfer_info`、`sftp_list`、`sftp_upload` 和 `sftp_download`。
+
+非 loopback 启动管理页面时必须配置管理 Token：
+
+```bash
+A2A_CONFIG_ADMIN_TOKEN='replace-me' node src/server.mjs --host 0.0.0.0 --port 8080
+```
+
 ## 验证
 
 ```bash

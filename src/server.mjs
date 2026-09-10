@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
@@ -29,15 +29,33 @@ import {
   updateSecretText,
   workspaceKey,
   writeAtomically,
+  STATE_FILE,
 } from "./core.mjs";
+import { dependencyStatus, FileTransferManager, removeRuntimeDescriptors, writeRuntimeDescriptors } from "./file-transfer.mjs";
 
 const SOURCE_ROOT = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(SOURCE_ROOT, "..");
 const STATIC_ROOT = join(APP_ROOT, "web");
+const LUCIDE_PATH = join(APP_ROOT, "node_modules", "lucide", "dist", "umd", "lucide.min.js");
 const SESSION_TOKEN = randomBytes(32).toString("hex");
+const ADMIN_TOKEN = process.env.A2A_CONFIG_ADMIN_TOKEN || "";
 const operations = new Map();
 const previews = new Map();
 let initializationQueue = Promise.resolve();
+const fileTransferManager = new FileTransferManager({ stateFile: STATE_FILE });
+let runtimeDescriptorInstances = [];
+let appLoopbackUrl = "";
+
+function valueFromArgs(name, fallback) {
+  const args = process.argv.slice(2);
+  const equals = args.find((arg) => arg.startsWith(`${name}=`));
+  if (equals) return equals.slice(name.length + 1);
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : fallback;
+}
+
+const SERVER_HOST = valueFromArgs("--host", process.env.A2A_CONFIG_HOST || "127.0.0.1");
+const SERVER_PORT = Number(valueFromArgs("--port", process.env.A2A_CONFIG_PORT || 0));
 
 function pluginSourceFromArgs(args = process.argv.slice(2)) {
   const equals = args.find((arg) => arg.startsWith("--plugin-source="));
@@ -107,6 +125,17 @@ function authenticate(request, response) {
     }
   }
   return true;
+}
+
+function isLoopbackAddress(address) {
+  const value = String(address || "").replace(/^::ffff:/, "");
+  return value === "127.0.0.1" || value === "::1";
+}
+
+function tokenMatches(actual, expected) {
+  const left = Buffer.from(String(actual || ""));
+  const right = Buffer.from(String(expected || ""));
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 function readManagedInstances() {
@@ -200,6 +229,10 @@ function startWorkspaceInitialization(workspacePath) {
     operation.status = "complete";
     operation.result = result;
     operation.updatedAt = Date.now();
+    if (appLoopbackUrl) {
+      runtimeDescriptorInstances = readManagedInstances().filter((instance) => !instance.error);
+      writeRuntimeDescriptors(runtimeDescriptorInstances, appLoopbackUrl);
+    }
   }).catch((error) => {
     operation.stage = "error";
     operation.status = "error";
@@ -385,8 +418,43 @@ function readDirectories(path) {
 const httpServer = createServer(async (request, response) => {
   const url = new URL(request.url || "/", "http://127.0.0.1");
   if (url.pathname === "/" && request.method === "GET") {
+    if (ADMIN_TOKEN && !isLoopbackAddress(request.socket.remoteAddress) && cookieValue(request, "a2a_config_session") !== SESSION_TOKEN) {
+      serveFile(response, join(STATIC_ROOT, "login.html"));
+      return;
+    }
     response.setHeader("set-cookie", `a2a_config_session=${SESSION_TOKEN}; HttpOnly; SameSite=Strict; Path=/`);
     serveFile(response, join(STATIC_ROOT, "index.html"));
+    return;
+  }
+  if (url.pathname === "/vendor/lucide.js" && request.method === "GET") {
+    serveFile(response, LUCIDE_PATH);
+    return;
+  }
+  if (url.pathname === "/api/login" && request.method === "POST") {
+    try {
+      const body = await readRequestBody(request);
+      if (!ADMIN_TOKEN || !tokenMatches(body.token, ADMIN_TOKEN)) {
+        sendError(response, 401, "INVALID_TOKEN", "管理 Token 不正确");
+        return;
+      }
+      response.setHeader("set-cookie", `a2a_config_session=${SESSION_TOKEN}; HttpOnly; SameSite=Strict; Path=/`);
+      sendJson(response, 200, { ok: true });
+    } catch (error) {
+      sendError(response, 400, "REQUEST_FAILED", error instanceof Error ? error.message : String(error));
+    }
+    return;
+  }
+  if (url.pathname === "/api/agent/file-workspaces" && request.method === "GET") {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      sendError(response, 403, "LOOPBACK_REQUIRED", "Agent 文件空间接口只允许本机访问");
+      return;
+    }
+    try {
+      const instances = readManagedInstances().filter((instance) => !instance.error);
+      sendJson(response, 200, { fileWorkspaces: fileTransferManager.connectionInfo(url.searchParams.get("agentId") || "", instances) });
+    } catch (error) {
+      sendError(response, 400, "REQUEST_FAILED", error instanceof Error ? error.message : String(error));
+    }
     return;
   }
   if (url.pathname.startsWith("/api/") && !authenticate(request, response)) return;
@@ -431,6 +499,52 @@ const httpServer = createServer(async (request, response) => {
       const instances = readManagedInstances().filter((entry) => !entry.error);
       sendJson(response, 200, await monitorInstances(instances));
       return;
+    }
+    if (url.pathname === "/api/file-workspaces" && request.method === "GET") {
+      sendJson(response, 200, { fileWorkspaces: fileTransferManager.list(), dependencies: dependencyStatus() });
+      return;
+    }
+    if (url.pathname === "/api/file-workspaces/inspect" && request.method === "POST") {
+      const body = await readRequestBody(request);
+      const instances = readManagedInstances().filter((instance) => !instance.error);
+      sendJson(response, 200, await fileTransferManager.inspect(body.root, instances, instances));
+      return;
+    }
+    if (url.pathname === "/api/file-workspaces" && request.method === "POST") {
+      const instances = readManagedInstances().filter((instance) => !instance.error);
+      sendJson(response, 201, await fileTransferManager.create(await readRequestBody(request), instances, instances));
+      return;
+    }
+    if (url.pathname === "/api/file-workspaces/status" && request.method === "GET") {
+      sendJson(response, 200, { statuses: await fileTransferManager.monitoredStatuses(), refreshedAt: new Date().toISOString() });
+      return;
+    }
+    const fileWorkspaceMatch = /^\/api\/file-workspaces\/([^/]+)(?:\/(enable|disable|restart|agents))?$/.exec(url.pathname);
+    if (fileWorkspaceMatch) {
+      const id = decodeURIComponent(fileWorkspaceMatch[1]);
+      const action = fileWorkspaceMatch[2];
+      const instances = readManagedInstances().filter((instance) => !instance.error);
+      if (request.method === "PUT" && !action) {
+        sendJson(response, 200, await fileTransferManager.update(id, await readRequestBody(request), instances));
+        return;
+      }
+      if (request.method === "PUT" && action === "agents") {
+        const body = await readRequestBody(request);
+        sendJson(response, 200, await fileTransferManager.update(id, { boundAgentKeys: body.boundAgentKeys }, instances));
+        return;
+      }
+      if (request.method === "POST" && action === "enable") {
+        sendJson(response, 200, await fileTransferManager.setEnabled(id, true));
+        return;
+      }
+      if (request.method === "POST" && action === "disable") {
+        sendJson(response, 200, await fileTransferManager.setEnabled(id, false));
+        return;
+      }
+      if (request.method === "POST" && action === "restart") {
+        sendJson(response, 200, await fileTransferManager.restart(id));
+        return;
+      }
     }
     if (url.pathname === "/api/ports/check" && request.method === "POST") {
       const body = await readRequestBody(request);
@@ -515,15 +629,34 @@ const httpServer = createServer(async (request, response) => {
 });
 
 export function startServer() {
-  httpServer.listen(0, "127.0.0.1", () => {
+  if (SERVER_HOST !== "127.0.0.1" && SERVER_HOST !== "::1" && !ADMIN_TOKEN) {
+    throw new Error("非 loopback 管理页面必须设置 A2A_CONFIG_ADMIN_TOKEN");
+  }
+  httpServer.listen(SERVER_PORT, SERVER_HOST, () => {
     const address = httpServer.address();
-    console.log(`A2A Config: http://127.0.0.1:${address.port}/`);
+    appLoopbackUrl = `http://127.0.0.1:${address.port}`;
+    runtimeDescriptorInstances = readManagedInstances().filter((instance) => !instance.error);
+    writeRuntimeDescriptors(runtimeDescriptorInstances, appLoopbackUrl);
+    fileTransferManager.restore();
+    console.log(`A2A Config: http://${SERVER_HOST}:${address.port}/`);
   });
   return httpServer;
 }
 
-export { applyPreview, createPreview, httpServer, statePayload };
+export async function stopServer() {
+  await fileTransferManager.stopAll();
+  removeRuntimeDescriptors(runtimeDescriptorInstances);
+  await new Promise((resolveStop) => httpServer.close(resolveStop));
+}
+
+export { applyPreview, createPreview, fileTransferManager, httpServer, statePayload };
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   startServer();
+  const shutdown = async () => {
+    await stopServer();
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }

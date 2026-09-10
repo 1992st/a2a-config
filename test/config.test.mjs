@@ -14,6 +14,7 @@ import {
   initializeWorkspace,
   normalizeInstanceId,
   pathsForWorkspace,
+  readAppState,
   readState,
   readRuntimeRegistry,
   readWorkspace,
@@ -335,8 +336,10 @@ test("state stores only workspace paths", () => {
   const { workspace, stateFile } = temporaryWorkspace();
   addWorkspaceToState(workspace, stateFile);
   const stored = JSON.parse(readFileSync(stateFile, "utf8"));
-  assert.deepEqual(Object.keys(stored).sort(), ["version", "workspaces"]);
+  assert.deepEqual(Object.keys(stored).sort(), ["fileWorkspaces", "version", "workspaces"]);
+  assert.equal(stored.version, 3);
   assert.deepEqual(stored.workspaces, [readWorkspacePath(workspace)]);
+  assert.deepEqual(stored.fileWorkspaces, []);
 });
 
 test("a stale workspace record does not block adding another workspace", () => {
@@ -344,6 +347,12 @@ test("a stale workspace record does not block adding another workspace", () => {
   writeFileSync(stateFile, JSON.stringify({ version: 2, workspaces: [join(root, "missing")] }));
   addWorkspaceToState(workspace, stateFile);
   assert.deepEqual(readState(stateFile), [join(root, "missing"), readWorkspacePath(workspace)]);
+});
+
+test("rejects a malformed state file instead of overwriting it as empty state", () => {
+  const { stateFile } = temporaryWorkspace();
+  writeFileSync(stateFile, "{broken");
+  assert.throws(() => readAppState(stateFile), /状态文件不是有效 JSON/);
 });
 
 function readWorkspacePath(workspace) {
