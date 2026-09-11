@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,6 +22,7 @@ import {
   secretUpdateFromDraft,
   secretName,
   updateSecretText,
+  findPiInstallations,
 } from "../src/core.mjs";
 import { joinBasePath, normalizeBasePath, stripBasePath } from "../src/server.mjs";
 
@@ -38,6 +39,28 @@ test("normalizes and joins configured base paths", () => {
   assert.equal(joinBasePath("/api/state", "/a2a-config"), "/a2a-config/api/state");
   assert.equal(stripBasePath("/a2a-config/api/state", "/a2a-config"), "/api/state");
   assert.equal(stripBasePath("/other", "/a2a-config"), null);
+});
+
+test("discovers a JavaScript Pi CLI through a symlink without relying on env node", () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-pi-link-"));
+  const script = join(root, "cli.js");
+  const link = join(root, "pi");
+  writeFileSync(script, "console.log('0.84.2')\n");
+  chmodSync(script, 0o755);
+  symlinkSync(script, link);
+  const previousPi = process.env.A2A_CONFIG_PI;
+  const previousNode = process.env.A2A_CONFIG_NODE;
+  process.env.A2A_CONFIG_PI = link;
+  process.env.A2A_CONFIG_NODE = process.execPath;
+  try {
+    const installation = findPiInstallations().find((entry) => entry.source === "environment");
+    assert.equal(installation?.version, "0.84.2");
+  } finally {
+    if (previousPi === undefined) delete process.env.A2A_CONFIG_PI;
+    else process.env.A2A_CONFIG_PI = previousPi;
+    if (previousNode === undefined) delete process.env.A2A_CONFIG_NODE;
+    else process.env.A2A_CONFIG_NODE = previousNode;
+  }
 });
 
 async function mockInstall({ agentDir, pluginSource }) {
