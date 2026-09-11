@@ -25,6 +25,12 @@ A2A_CONFIG_PI=/path/to/pi
 A2A_CONFIG_PLUGIN_SOURCE=/path/to/zhangst_a2a-pi
 ```
 
+嵌入其他应用时可设置 URL 前缀；独立运行时保持为空：
+
+```bash
+A2A_CONFIG_BASE_PATH=/a2a-config node src/server.mjs
+```
+
 ## 添加工作目录
 
 工具只要求一个工作目录，并使用以下结构：

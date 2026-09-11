@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 
-async function startTestServer(root) {
+async function startTestServer(root, basePath = "") {
   const fakePi = join(root, "fake-pi.mjs");
   writeFileSync(fakePi, `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
@@ -49,6 +49,7 @@ else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh
       A2A_CONFIG_STATE_FILE: join(root, "state.json"),
       OPENAI_API_KEY: "must-not-reach-rclone",
       A2A_CONFIG_ADMIN_TOKEN: "must-not-reach-rclone",
+      A2A_CONFIG_BASE_PATH: basePath,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -67,14 +68,14 @@ else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh
     });
     server.once("exit", (code) => reject(new Error(`server exited ${code}: ${stderr}`)));
   });
-  const rootResponse = await fetch(baseUrl);
+  const rootResponse = await fetch(new URL(`${basePath}/`.replace(/^\//, ""), baseUrl));
   const cookie = rootResponse.headers.get("set-cookie")?.split(";")[0];
   return {
     baseUrl,
     cookie,
     server,
     async request(path, options = {}) {
-      const response = await fetch(new URL(path, baseUrl), {
+      const response = await fetch(new URL(`${basePath}${path}`.replace(/^\//, ""), baseUrl), {
         ...options,
         headers: {
           cookie,
@@ -90,6 +91,25 @@ else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh
     },
   };
 }
+
+test("serves the complete application under a configured base path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-base-path-"));
+  const client = await startTestServer(root, "/a2a-config");
+  try {
+    const page = await fetch(new URL("a2a-config/", client.baseUrl));
+    const html = await page.text();
+    assert.equal(page.status, 200);
+    assert.match(html, /content="\/a2a-config"/);
+    assert.match(html, /href="\/a2a-config\/styles\.css"/);
+    assert.match(page.headers.get("set-cookie") || "", /Path=\/a2a-config/);
+    assert.equal((await fetch(new URL("a2a-config/styles.css", client.baseUrl))).status, 200);
+    assert.equal((await fetch(new URL("a2a-config/app.js", client.baseUrl))).status, 200);
+    const state = await client.request("/api/state");
+    assert.equal(state.response.status, 200);
+  } finally {
+    client.stop();
+  }
+});
 
 async function waitForOperation(client, id) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
