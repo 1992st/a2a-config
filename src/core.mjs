@@ -633,7 +633,7 @@ export async function installPlugin({ piExecutable, pluginSource, workspace, age
   const args = piExecutable.endsWith(".js") ? [piExecutable, "install", pluginSource] : ["install", pluginSource];
   const { stdout, stderr } = await execFile(command, args, {
     cwd: workspace,
-    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: process.versions.electron ? "1" : process.env.ELECTRON_RUN_AS_NODE, PI_CODING_AGENT_DIR: agentDir },
     timeout: 300_000,
     maxBuffer: 2 * 1024 * 1024,
   });
@@ -653,7 +653,7 @@ export function findPiInstallations() {
       try {
         const command = path.endsWith(".js") ? process.execPath : path;
         const args = path.endsWith(".js") ? [path, "--version"] : ["--version"];
-        version = execFileSync(command, args, { encoding: "utf8", timeout: 1500, stdio: ["ignore", "pipe", "ignore"] }).trim();
+        version = execFileSync(command, args, { encoding: "utf8", timeout: 1500, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, ELECTRON_RUN_AS_NODE: process.versions.electron ? "1" : process.env.ELECTRON_RUN_AS_NODE } }).trim();
       } catch {}
       found.push({ executablePath: path, realPath, source, version });
     } catch {}
