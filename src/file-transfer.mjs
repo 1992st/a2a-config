@@ -4,7 +4,7 @@ import { networkInterfaces } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { hashText, hostsConflict, probePort, readAppState, updateAppState } from "./core.mjs";
+import { hashText, hostsConflict, probePort, readAppState, updateAppState, workspaceKey, writeAtomically } from "./core.mjs";
 
 const WORKER_PATH = fileURLToPath(new URL("./rclone-worker.mjs", import.meta.url));
 const FILE_PORT = 2022;
@@ -83,6 +83,7 @@ export function validateFileWorkspace(input, agents) {
   const password = String(input.password || "");
   const port = Number(input.port);
   const boundAgentKeys = [...new Set(Array.isArray(input.boundAgentKeys) ? input.boundAgentKeys.filter((key) => agents.some((agent) => agent.key === key)) : [])];
+  const boundAgents = boundAgentKeys.map((key) => agents.find((agent) => agent.key === key)).filter(Boolean).map((agent) => ({ agentDir: agent.agentDir, cwd: agent.workspace }));
   if (!name || name.length > 80) throw new Error("文件空间名称不能为空且不能超过 80 个字符");
   if (!username || username.length > 64 || /[\x00-\x20/:]/.test(username)) throw new Error("SFTP 用户名不能包含空格、控制字符、斜杠或冒号");
   if (!password || password.length > 1024) throw new Error("SFTP 密码不能为空且不能超过 1024 个字符");
@@ -95,7 +96,7 @@ export function validateFileWorkspace(input, agents) {
   if (!parsed.hostname || parsed.username || parsed.password || (parsed.pathname && parsed.pathname !== "/") || parsed.search || parsed.hash) throw new Error("对外地址只能包含主机和端口");
   const listenHost = String(input.listenHost || "0.0.0.0");
   if (/[\s\0]/.test(listenHost)) throw new Error("监听地址格式无效");
-  return { root, name, username, password, port, boundAgentKeys, publicUrl: parsed.toString().replace(/\/$/, ""), listenHost };
+  return { root, name, username, password, port, boundAgentKeys, boundAgents, publicUrl: parsed.toString().replace(/\/$/, ""), listenHost };
 }
 
 function hostKeyDirectory(stateFile, id) {
@@ -140,8 +141,21 @@ export class FileTransferManager {
     return readAppState(this.stateFile);
   }
 
-  list() {
-    return this.state().fileWorkspaces.map((config) => ({ ...config, password: config.password, status: this.status(config.id) }));
+  list(agents = []) {
+    return this.state().fileWorkspaces.map((config) => {
+      const rebound = agents.filter((agent) =>
+        config.boundAgentKeys.includes(agent.key) ||
+        config.boundAgentKeys.includes(workspaceKey(agent.workspace)) ||
+        (Array.isArray(config.boundAgents) && config.boundAgents.some((binding) => binding?.agentDir === agent.agentDir && binding?.cwd === agent.workspace))
+      );
+      return {
+        ...config,
+        boundAgentKeys: rebound.length ? rebound.map((agent) => agent.key) : config.boundAgentKeys,
+        boundAgents: rebound.length ? rebound.map((agent) => ({ agentDir: agent.agentDir, cwd: agent.workspace })) : config.boundAgents,
+        password: config.password,
+        status: this.status(config.id),
+      };
+    });
   }
 
   status(id) {
@@ -288,7 +302,12 @@ export class FileTransferManager {
     const matches = agents.filter((agent) => agent.instanceId === agentId);
     if (matches.length !== 1) return [];
     return this.state().fileWorkspaces
-      .filter((entry) => entry.enabled && entry.boundAgentKeys.includes(matches[0].key) && this.status(entry.id).state === "running")
+      .filter((entry) => {
+        const semantic = Array.isArray(entry.boundAgents) && entry.boundAgents.some((binding) => binding?.agentDir === matches[0].agentDir && binding?.cwd === matches[0].workspace);
+        const currentKey = entry.boundAgentKeys.includes(matches[0].key);
+        const legacyKey = entry.boundAgentKeys.includes(workspaceKey(matches[0].workspace));
+        return entry.enabled && (semantic || currentKey || legacyKey) && this.status(entry.id).state === "running";
+      })
       .map((entry) => ({
         id: entry.id,
         name: entry.name,
@@ -325,15 +344,29 @@ export class FileTransferManager {
 }
 
 export function writeRuntimeDescriptors(instances, url) {
-  for (const instance of instances) {
-    try {
-      writeFileSync(join(instance.agentDir, "a2a_config_runtime.json"), `${JSON.stringify({ pid: process.pid, url, startedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
-    } catch {}
+  for (const agentDir of [...new Set(instances.map((instance) => instance.agentDir))]) {
+    const path = join(agentDir, "a2a_config_runtime.json");
+    if (existsSync(path)) {
+      try {
+        const owner = JSON.parse(readFileSync(path, "utf8"));
+        if (Number(owner.pid) !== process.pid) {
+          process.kill(Number(owner.pid), 0);
+          throw new Error(`另一个 A2A Config 正在管理 ${agentDir}（PID ${owner.pid}）`);
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("另一个 A2A Config")) throw error;
+      }
+    }
+    writeAtomically(path, `${JSON.stringify({ pid: process.pid, url, startedAt: new Date().toISOString() }, null, 2)}\n`, 0o600);
   }
 }
 
 export function removeRuntimeDescriptors(instances) {
-  for (const instance of instances) {
-    try { unlinkSync(join(instance.agentDir, "a2a_config_runtime.json")); } catch {}
+  for (const agentDir of [...new Set(instances.map((instance) => instance.agentDir))]) {
+    const path = join(agentDir, "a2a_config_runtime.json");
+    try {
+      const owner = JSON.parse(readFileSync(path, "utf8"));
+      if (Number(owner.pid) === process.pid) unlinkSync(path);
+    } catch {}
   }
 }

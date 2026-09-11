@@ -63,7 +63,7 @@ function hasConfiguredConnection(workspace) {
 }
 
 function connectionStatus(workspace) {
-  if (workspace.operation?.status === "running") return { title: "插件安装中", detail: `正在执行：${workspace.operation.stage}` };
+  if (workspace.operation?.status === "running") return { title: "正在写入系统 Pi 配置", detail: `正在执行：${workspace.operation.stage}` };
   if (!hasConfiguredConnection(workspace)) return { title: "尚未配置连接", detail: "未连接其他 Pi，Server 尚未启用" };
   const details = [];
   if (workspace.peers.length) details.push(`已配置其他 Pi ${workspace.peers.length} 个`);
@@ -88,9 +88,9 @@ function conflictMessage(conflict) {
 function runtimeMessage(runtimeStatus) {
   const loaded = runtimeStatus?.loadedPids || [];
   const unconfirmed = runtimeStatus?.unconfirmedPids || [];
-  if (loaded.length && unconfirmed.length) return `PID ${loaded.join("、")} 已加载专属配置；PID ${unconfirmed.join("、")} 未确认加载 .pi/agent。请退出未确认的 Pi 进程。`;
-  if (loaded.length) return `当前 Pi 已加载专属配置（PID ${loaded.join("、")}）`;
-  if (unconfirmed.length) return `检测到 Pi 正在此工作目录运行（PID ${unconfirmed.join("、")}），但无法确认它加载了 .pi/agent。请退出该 Pi，并使用“复制启动命令”重新启动。`;
+  if (loaded.length && unconfirmed.length) return `PID ${loaded.join("、")} 已加载系统 A2A 配置；PID ${unconfirmed.join("、")} 尚未确认加载插件。`;
+  if (loaded.length) return `当前 Pi 已加载系统 A2A 配置（PID ${loaded.join("、")}）`;
+  if (unconfirmed.length) return `检测到 Pi 正在此工作目录运行（PID ${unconfirmed.join("、")}），但尚未确认加载 A2A 插件。`;
   return "";
 }
 
@@ -175,7 +175,7 @@ function serverView(workspace) {
   return `<section class="section">
     <div class="section-header"><div><h2>Server 配置</h2><p class="section-description">状态和端口冲突优先显示；其余参数按需调整。</p></div></div>
     ${workspace.projectSettings.hasA2a ? '<div class="notice">检测到 .pi/settings.json 中已有 A2A 配置；该文件保持不变。</div>' : ""}
-    ${!workspace.plugin.installed ? '<div class="notice error">A2A 插件未安装。重新添加此工作目录可重试安装。</div>' : ""}
+    ${!workspace.plugin.configured ? '<div class="notice">系统 Pi 尚未配置 pi-a2a；仍可保存配置，安装扩展后即可生效。</div>' : !workspace.plugin.available ? '<div class="notice error">系统 Pi 已配置 pi-a2a，但插件来源当前不可用。</div>' : ""}
     <form id="server-form" class="form-grid">
       <div class="field"><label for="instance-id">instanceId</label><input class="control mono" id="instance-id" value="${escapeHtml(draft.instanceId)}"></div>
       <div class="field"><label for="agent-name">Agent 名称</label><input class="control" id="agent-name" value="${escapeHtml(draft.server.agentName || workspace.agentName)}"></div>
@@ -250,6 +250,7 @@ function render() {
   const connection = connectionStatus(workspace);
   content.innerHTML = `<header class="page-header"><div><h1>${escapeHtml(workspace.agentName)}</h1><p class="path">${escapeHtml(workspace.workspace)}</p></div><button class="button" id="copy-start" type="button">复制启动命令</button></header>
     <section class="status-panel ${panelSeverity === "none" && hasConfiguredConnection(workspace) ? "running" : panelSeverity}"><div><strong class="status-title">${escapeHtml(connection.title)}</strong><p class="status-detail">${escapeHtml(connection.detail)}</p></div><button class="button ${workspace.server.enabled ? "" : "primary"}" id="server-action" type="button">${workspace.server.enabled ? "关闭 Server" : "启用 Server"}</button></section>
+    ${workspace.legacyA2aExists ? `<div class="notice">检测到旧专属 A2A 配置：${escapeHtml(workspace.legacySettingsPath)}。<button class="button" id="preview-legacy-migration" type="button">预览迁移到系统 Pi</button></div>` : ""}
     ${runtime ? `<div class="notice ${runtimeStatus.status === "loaded" ? "success" : ""}">${escapeHtml(runtime)}</div>` : ""}
     ${conflicts.length ? `<div class="notice ${severity === "error" ? "error" : ""}">${conflicts.map((entry) => escapeHtml(conflictMessage(entry))).join("<br>")}</div>` : ""}
     <nav class="tabs" role="tablist" aria-label="A2A 配置"><button class="tab ${state.tab === "server" ? "active" : ""}" data-tab="server" role="tab" type="button">Server</button><button class="tab ${state.tab === "outgoing" ? "active" : ""}" data-tab="outgoing" role="tab" type="button">连接其他 Pi</button><button class="tab ${state.tab === "incoming" ? "active" : ""}" data-tab="incoming" role="tab" type="button">允许其他 Pi 连接</button></nav>
@@ -340,6 +341,10 @@ function updateDraftPortStatus(workspace) {
 function bindWorkspaceEvents(workspace) {
   document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { state.tab = button.dataset.tab; render(); }));
   $("#copy-start")?.addEventListener("click", () => copyText(workspace.startCommand, "启动命令已复制"));
+  $("#preview-legacy-migration")?.addEventListener("click", async () => {
+    try { showPreview(await api("/api/migrations/legacy/preview", { method: "POST", body: JSON.stringify({ workspace: workspace.workspace }) })); }
+    catch (error) { notify(error.message); }
+  });
   $("#server-action")?.addEventListener("click", () => workspace.server.enabled ? disableServer(workspace) : enableServer(workspace));
   $("#server-form")?.addEventListener("input", () => {
     mergeDraft({
@@ -439,7 +444,7 @@ async function validateConnection(workspace, name) {
     const unconfirmed = workspace.runtimeStatus?.unconfirmedPids || [];
     if (loaded.length && unconfirmed.length) notify(`远端可达；PID ${loaded.join("、")} 已加载配置，PID ${unconfirmed.join("、")} 未确认：${result.name}`);
     else if (loaded.length) notify(`远端可达，当前 Pi 已加载配置：${result.name}`);
-    else notify(`远端可达，但当前 Pi 尚未确认加载专属配置：${result.name}`);
+    else notify(`远端可达，但当前 Pi 尚未确认加载系统 A2A 配置：${result.name}`);
   } catch (error) { notify(`验证失败：${error.message}`); }
 }
 
@@ -512,13 +517,13 @@ function renderFileInspection(inspection) {
 function renderInspection(inspection) {
   const target = $("#workspace-inspection");
   target.classList.remove("hidden");
-  target.innerHTML = `<strong>${escapeHtml(inspection.folderName)}</strong><br>.pi 目录：${inspection.piExists ? "已存在，保留全部内容" : "不存在，将自动创建"}<br>.pi/agent/settings.json：${inspection.agentSettingsExists ? "已存在，保留其他配置" : "不存在，将自动创建"}<br>.pi/settings.json：${inspection.projectSettingsExists ? "已存在，只读" : "不存在，按设计不创建"}<br>专属 A2A：${inspection.existingA2a ? "已存在，不修改" : "不存在，将创建"}<br>Agent 名称：${escapeHtml(inspection.agentName)}<br>建议端口：${inspection.suggestedPort}<br>插件：${inspection.plugin.installed ? "已安装" : "将自动安装"}`;
+  target.innerHTML = `<strong>${escapeHtml(inspection.folderName)}</strong><br>系统 Agent 配置：${escapeHtml(inspection.agentDir)}<br>.pi/settings.json：${inspection.projectSettingsExists ? "已存在，只读合并" : "不存在"}<br>系统 A2A profile：${inspection.existingA2a ? "已存在，保留" : "不存在，将创建"}<br>${inspection.legacyA2aExists ? `<span class="warning-text">检测到旧专属配置：${escapeHtml(inspection.legacySettingsPath)}，不会自动覆盖系统配置</span><br>` : ""}Agent 名称：${escapeHtml(inspection.agentName)}<br>建议端口：${inspection.suggestedPort}<br>pi-a2a：${inspection.plugin.configured ? inspection.plugin.available ? "系统已配置且来源可用" : "系统已配置但来源不可用" : "系统未配置；本工具不会自动安装"}`;
 }
 
 function renderOperation(operation) {
-  const stages = ["inspect", "create", "configure", "install", "complete"];
+  const stages = ["inspect", "configure", "complete"];
   const current = stages.indexOf(operation.stage);
-  const names = { inspect: "检查目录", create: "创建专属 Pi", configure: "写入 A2A 配置", install: "安装插件", complete: "完成" };
+  const names = { inspect: "检查目录", configure: "写入系统 Pi profile", complete: "完成" };
   const target = $("#workspace-operation");
   target.classList.remove("hidden");
   target.innerHTML = `<div class="stage-list">${stages.map((stage, index) => `<span class="stage ${index < current ? "done" : index === current ? "current" : ""}">${names[stage]}</span>`).join("")}</div>${operation.error ? `<div class="notice error">${escapeHtml(operation.error)}${operation.retryCommand ? `<pre>${escapeHtml(operation.retryCommand)}</pre>` : ""}</div>` : ""}`;

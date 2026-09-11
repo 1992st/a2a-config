@@ -10,6 +10,7 @@ import {
   buildPortStatus,
   buildRuntimeStatuses,
   createToken,
+  envValue,
   fileMode,
   findPiInstallations,
   findRunningPiProcesses,
@@ -19,15 +20,16 @@ import {
   isRecord,
   normalizeWorkspacePath,
   probePort,
+  readAgentDirectories,
+  readAppState,
   readJsonFile,
   readState,
   readWorkspace,
-  removeWorkspaceFromState,
   renameSecretText,
-  resolvePluginSource,
+  secretName,
   secretUpdateFromDraft,
   updateSecretText,
-  workspaceKey,
+  updateAppState,
   writeAtomically,
   STATE_FILE,
 } from "./core.mjs";
@@ -43,6 +45,7 @@ const SESSION_TOKEN = PROXY_TOKEN || randomBytes(32).toString("hex");
 const BASE_PATH = normalizeBasePath(process.env.A2A_CONFIG_BASE_PATH || "");
 const operations = new Map();
 const previews = new Map();
+const MAX_TRANSIENT_RECORDS = 100;
 let initializationQueue = Promise.resolve();
 const fileTransferManager = new FileTransferManager({ stateFile: STATE_FILE });
 let runtimeDescriptorInstances = [];
@@ -59,16 +62,7 @@ function valueFromArgs(name, fallback) {
 const SERVER_HOST = valueFromArgs("--host", process.env.A2A_CONFIG_HOST || "127.0.0.1");
 const SERVER_PORT = Number(valueFromArgs("--port", process.env.A2A_CONFIG_PORT || 0));
 
-function pluginSourceFromArgs(args = process.argv.slice(2)) {
-  const equals = args.find((arg) => arg.startsWith("--plugin-source="));
-  if (equals) return equals.slice("--plugin-source=".length);
-  const index = args.indexOf("--plugin-source");
-  return index >= 0 ? args[index + 1] : undefined;
-}
-
-const pluginSource = resolvePluginSource(APP_ROOT, pluginSourceFromArgs());
 const piInstallations = findPiInstallations();
-const piExecutable = process.env.A2A_CONFIG_PI || piInstallations[0]?.executablePath;
 
 function normalizeBasePath(value) {
   const trimmed = String(value || "").trim();
@@ -168,17 +162,7 @@ function tokenMatches(actual, expected) {
 }
 
 function readManagedInstances() {
-  return readState().map((workspace) => {
-    try {
-      return { ...readWorkspace(workspace), error: null };
-    } catch (error) {
-      return {
-        key: workspaceKey(resolve(workspace)),
-        workspace: resolve(workspace),
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  });
+  return readAgentDirectories(readState());
 }
 
 function operationForWorkspace(workspace) {
@@ -189,6 +173,7 @@ function operationForWorkspace(workspace) {
 
 async function statePayload() {
   const instances = readManagedInstances();
+  const appState = readAppState();
   const validInstances = instances.filter((instance) => !instance.error);
   const monitoring = await monitorInstances(validInstances);
   const portStatuses = monitoring.statuses;
@@ -197,12 +182,14 @@ async function statePayload() {
   return {
     workspaces: instances.map((instance) => ({
       ...instance,
+      legacyA2aExists: instance.legacyA2aExists && !appState.migratedLegacyWorkspaces.includes(instance.workspace),
       portStatus: portByKey.get(instance.key),
       runtimeStatus: runtimeByKey.get(instance.key),
       operation: operationForWorkspace(instance.workspace),
     })),
-    pluginSource: pluginSource || null,
     piInstallation: piInstallations[0] || null,
+    legacyWorkspaces: readAppState().legacyWorkspaces,
+    agentDirs: readState(),
     refreshIntervalMs: 30_000,
   };
 }
@@ -241,12 +228,10 @@ function startWorkspaceInitialization(workspacePath) {
     updatedAt: Date.now(),
   };
   operations.set(operation.id, operation);
+  while (operations.size > MAX_TRANSIENT_RECORDS) operations.delete(operations.keys().next().value);
   const initialization = initializationQueue.then(() => initializeWorkspace({
     workspacePath: workspace,
-    managedWorkspaces: readState(),
     instances: readManagedInstances().filter((instance) => !instance.error),
-    pluginSource,
-    piExecutable,
     onStage(stage) {
       operation.stage = stage;
       operation.updatedAt = Date.now();
@@ -304,7 +289,8 @@ function envSnapshot(path) {
 }
 
 function createPreview(workspacePath, draft) {
-  const instance = readWorkspace(workspacePath);
+  const instance = readManagedInstances().find((entry) => !entry.error && entry.workspace === normalizeWorkspacePath(workspacePath));
+  if (!instance) throw Object.assign(new Error("实例不存在"), { status: 404, code: "NOT_FOUND" });
   validateDraft(instance, draft);
   const settings = readJsonFile(instance.settingsPath, { required: true });
   const env = envSnapshot(instance.envPath);
@@ -319,6 +305,7 @@ function createPreview(workspacePath, draft) {
   const preview = {
     id: randomUUID(),
     workspace: instance.workspace,
+    agentDir: instance.agentDir,
     settingsPath: instance.settingsPath,
     envPath: instance.envPath,
     settingsHash: settings.hash,
@@ -332,11 +319,55 @@ function createPreview(workspacePath, draft) {
     expiresAt: Date.now() + 300_000,
   };
   previews.set(preview.id, preview);
+  while (previews.size > MAX_TRANSIENT_RECORDS) previews.delete(previews.keys().next().value);
   return {
     previewId: preview.id,
     settingsDiff: `${settings.text}\n---\n${settingsText}`,
     envDiff: preview.envChanged ? `${env.text}\n---\n${nextEnv}` : "无 secret 修改",
   };
+}
+
+function mergeRecords(base, overlay) {
+  const result = structuredClone(base);
+  for (const [key, value] of Object.entries(overlay)) {
+    result[key] = isRecord(value) && isRecord(result[key]) ? mergeRecords(result[key], value) : structuredClone(value);
+  }
+  return result;
+}
+
+function createLegacyMigrationPreview(workspacePath) {
+  const workspace = normalizeWorkspacePath(workspacePath);
+  const instance = readManagedInstances().find((entry) => !entry.error && entry.workspace === workspace);
+  if (!instance) throw Object.assign(new Error("请先为该工作目录创建系统 Pi profile"), { status: 409, code: "PROFILE_REQUIRED" });
+  const legacyAgentDir = join(workspace, ".pi", "agent");
+  const legacySettings = readJsonFile(join(legacyAgentDir, "settings.json"), { required: true });
+  if (!isRecord(legacySettings.value.a2a)) throw Object.assign(new Error("没有可迁移的旧 A2A 配置"), { status: 404, code: "LEGACY_NOT_FOUND" });
+  const legacyRoot = structuredClone(legacySettings.value.a2a);
+  const legacyProfiles = isRecord(legacyRoot.profiles) ? legacyRoot.profiles : {};
+  delete legacyRoot.profiles;
+  const legacyProfile = isRecord(legacyProfiles[workspace]) ? mergeRecords(legacyRoot, legacyProfiles[workspace]) : legacyRoot;
+  const settings = readJsonFile(instance.settingsPath, { required: true });
+  const nextSettings = structuredClone(settings.value);
+  if (!isRecord(nextSettings.a2a)) nextSettings.a2a = {};
+  if (!isRecord(nextSettings.a2a.profiles)) nextSettings.a2a.profiles = {};
+  nextSettings.a2a.profiles[workspace] = legacyProfile;
+  const env = envSnapshot(instance.envPath);
+  const legacyEnv = envSnapshot(join(legacyAgentDir, ".env.local"));
+  const instanceId = typeof legacyProfile.instanceId === "string" ? legacyProfile.instanceId : instance.instanceId;
+  const legacySecret = envValue(legacyEnv.text, secretName(instanceId));
+  const nextEnv = isRecord(legacySecret) ? updateSecretText(env.text, instanceId, legacySecret) : env.text;
+  const settingsText = `${JSON.stringify(nextSettings, null, 2)}\n`;
+  const preview = {
+    id: randomUUID(), workspace, agentDir: instance.agentDir,
+    settingsPath: instance.settingsPath, envPath: instance.envPath,
+    settingsHash: settings.hash, envHash: env.hash, envExisted: env.exists,
+    previousSettings: settings.text, previousEnv: env.text,
+    settingsText, envText: nextEnv, envChanged: nextEnv !== env.text,
+    expiresAt: Date.now() + 300_000,
+    legacyMigration: true,
+  };
+  previews.set(preview.id, preview);
+  return { previewId: preview.id, settingsDiff: `${settings.text}\n---\n${settingsText}`, envDiff: preview.envChanged ? `${env.text}\n---\n${nextEnv}` : "无 secret 修改" };
 }
 
 function applyPreview(previewId) {
@@ -372,7 +403,10 @@ function applyPreview(previewId) {
       throw Object.assign(new Error("保存失败，原配置已恢复"), { code: "SAVE_FAILED", status: 500, details: String(error) });
     }
     previews.delete(previewId);
-    return { ok: true, reloadRequired: true, instance: readWorkspace(preview.workspace) };
+    if (preview.legacyMigration) {
+      updateAppState((state) => ({ ...state, migratedLegacyWorkspaces: [...new Set([...state.migratedLegacyWorkspaces, preview.workspace])] }));
+    }
+    return { ok: true, reloadRequired: true, instance: readWorkspace(preview.workspace, preview.agentDir) };
   } finally {
     release();
   }
@@ -509,9 +543,10 @@ const httpServer = createServer(async (request, response) => {
     }
     if (pathname === "/api/workspaces/inspect" && request.method === "POST") {
       const body = await readRequestBody(request);
-      const inspection = inspectWorkspace(body.path, readState());
-      const suggestedPort = inspection.existingA2a ? readWorkspace(inspection.workspace).server.port : await chooseCandidatePort();
-      sendJson(response, 200, { ...inspection, suggestedPort, pluginSource: pluginSource || null, piExecutable: piExecutable || null });
+      const instances = readManagedInstances().filter((instance) => !instance.error);
+      const inspection = inspectWorkspace(body.path, instances);
+      const suggestedPort = inspection.existingA2a ? readWorkspace(inspection.workspace, inspection.agentDir).server.port : await chooseCandidatePort();
+      sendJson(response, 200, { ...inspection, suggestedPort });
       return;
     }
     if (pathname === "/api/workspaces" && request.method === "POST") {
@@ -526,8 +561,7 @@ const httpServer = createServer(async (request, response) => {
         sendError(response, 404, "NOT_FOUND", "工作目录不存在");
         return;
       }
-      removeWorkspaceFromState(instance.workspace);
-      sendJson(response, 200, { ok: true });
+      sendError(response, 405, "READ_ONLY_REGISTRATION", "系统 Pi profile 不能从工作目录列表直接删除，请在配置预览中修改");
       return;
     }
     if (pathname.startsWith("/api/operations/") && request.method === "GET") {
@@ -545,7 +579,7 @@ const httpServer = createServer(async (request, response) => {
       return;
     }
     if (pathname === "/api/file-workspaces" && request.method === "GET") {
-      sendJson(response, 200, { fileWorkspaces: fileTransferManager.list(), dependencies: dependencyStatus() });
+      sendJson(response, 200, { fileWorkspaces: fileTransferManager.list(readManagedInstances().filter((instance) => !instance.error)), dependencies: dependencyStatus() });
       return;
     }
     if (pathname === "/api/file-workspaces/inspect" && request.method === "POST") {
@@ -601,7 +635,6 @@ const httpServer = createServer(async (request, response) => {
       const key = pathname.split("/")[3];
       const instance = instanceByKey(key);
       if (!instance) throw Object.assign(new Error("实例不存在"), { status: 404, code: "NOT_FOUND" });
-      if (!instance.plugin.installed) throw Object.assign(new Error("A2A 插件尚未安装"), { status: 409, code: "PLUGIN_MISSING" });
       const body = await readRequestBody(request);
       const baseDraft = isRecord(body.draft) ? body.draft : {};
       const removedInbound = new Set(Array.isArray(baseDraft.removeIncoming) ? baseDraft.removeIncoming : []);
@@ -637,6 +670,11 @@ const httpServer = createServer(async (request, response) => {
     if (pathname === "/api/config/preview" && request.method === "POST") {
       const body = await readRequestBody(request);
       sendJson(response, 200, createPreview(body.workspace, isRecord(body.draft) ? body.draft : {}));
+      return;
+    }
+    if (pathname === "/api/migrations/legacy/preview" && request.method === "POST") {
+      const body = await readRequestBody(request);
+      sendJson(response, 200, createLegacyMigrationPreview(body.workspace));
       return;
     }
     if (pathname === "/api/config/apply" && request.method === "POST") {
@@ -678,16 +716,29 @@ export function startServer() {
   }
   httpServer.listen(SERVER_PORT, SERVER_HOST, () => {
     const address = httpServer.address();
-    appLoopbackUrl = `http://127.0.0.1:${address.port}`;
+    appLoopbackUrl = `http://127.0.0.1:${address.port}${BASE_PATH}`;
     runtimeDescriptorInstances = readManagedInstances().filter((instance) => !instance.error);
-    writeRuntimeDescriptors(runtimeDescriptorInstances, appLoopbackUrl);
-    fileTransferManager.restore();
-    console.log(`A2A Config: http://${SERVER_HOST}:${address.port}/`);
+    try {
+      writeRuntimeDescriptors(runtimeDescriptorInstances, appLoopbackUrl);
+      fileTransferManager.restore();
+      console.log(`A2A Config: http://${SERVER_HOST}:${address.port}/`);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      void stopServer();
+    }
   });
   return httpServer;
 }
 
+const transientCleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [id, preview] of previews) if (preview.expiresAt < now) previews.delete(id);
+  for (const [id, operation] of operations) if (operation.status !== "running" && now - operation.updatedAt > 300_000) operations.delete(id);
+}, 60_000);
+transientCleanup.unref();
+
 export async function stopServer() {
+  clearInterval(transientCleanup);
   await fileTransferManager.stopAll();
   removeRuntimeDescriptors(runtimeDescriptorInstances);
   await new Promise((resolveStop) => httpServer.close(resolveStop));

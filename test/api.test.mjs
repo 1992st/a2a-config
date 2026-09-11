@@ -6,16 +6,11 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 
 async function startTestServer(root, basePath = "", proxyToken = "") {
-  const fakePi = join(root, "fake-pi.mjs");
-  writeFileSync(fakePi, `#!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-const path = join(process.env.PI_CODING_AGENT_DIR, "settings.json");
-const settings = JSON.parse(readFileSync(path, "utf8"));
-settings.packages = [...(settings.packages || []), process.argv[3]];
-writeFileSync(path, JSON.stringify(settings, null, 2) + "\\n");
-`);
-  chmodSync(fakePi, 0o755);
+  const agentDir = join(root, "system-agent");
+  const pluginDir = join(root, "zhangst_a2a-pi");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [pluginDir] }));
   const fakeRclone = join(root, "rclone");
   writeFileSync(fakeRclone, `#!/usr/bin/env node
 import { createServer } from "node:net";
@@ -39,11 +34,11 @@ if (process.argv.includes("-lf")) console.log("256 SHA256:test-fingerprint host 
 else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh-ed25519 AAAATEST host\\n"); }
 `);
   chmodSync(fakeSshKeygen, 0o755);
-  const server = spawn(process.execPath, [resolve("src/server.mjs"), "--plugin-source", "/plugins/zhangst_a2a-pi"], {
+  const server = spawn(process.execPath, [resolve("src/server.mjs")], {
     cwd: resolve("."),
     env: {
       ...process.env,
-      A2A_CONFIG_PI: fakePi,
+      A2A_CONFIG_AGENT_DIR: agentDir,
       A2A_CONFIG_RCLONE: fakeRclone,
       A2A_CONFIG_SSH_KEYGEN: fakeSshKeygen,
       A2A_CONFIG_STATE_FILE: join(root, "state.json"),
@@ -73,6 +68,7 @@ else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh
   const cookie = rootResponse.headers.get("set-cookie")?.split(";")[0];
   return {
     baseUrl,
+    agentDir,
     cookie,
     server,
     async request(path, options = {}) {
@@ -108,6 +104,24 @@ test("serves the complete application under a configured base path", async () =>
     assert.equal((await fetch(new URL("a2a-config/app.js", client.baseUrl))).status, 200);
     const state = await client.request("/api/state");
     assert.equal(state.response.status, 200);
+  } finally {
+    client.stop();
+  }
+});
+
+test("publishes a base-path runtime endpoint consumable by the system plugin", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-runtime-path-"));
+  const workspace = join(root, "project");
+  mkdirSync(workspace);
+  const client = await startTestServer(root, "/a2a-config", "host-secret");
+  try {
+    const started = await client.request("/api/workspaces", { method: "POST", body: JSON.stringify({ path: workspace }) });
+    await waitForOperation(client, started.body.id);
+    const descriptor = JSON.parse(readFileSync(join(client.agentDir, "a2a_config_runtime.json"), "utf8"));
+    assert.match(descriptor.url, /\/a2a-config$/);
+    const response = await fetch(`${descriptor.url}/api/agent/file-workspaces?agentId=project`);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).fileWorkspaces, []);
   } finally {
     client.stop();
   }
@@ -178,7 +192,7 @@ test("workspace API completes initialization and the Server enable wizard", asyn
     assert.equal(inspected.body.agentName, "remote-project");
     assert.equal(inspected.body.projectA2aExists, true);
     assert.equal(inspected.body.projectSettingsExists, true);
-    assert.equal(inspected.body.agentSettingsExists, false);
+    assert.equal(inspected.body.agentSettingsExists, true);
     assert.equal(inspected.body.suggestedPort, 9910);
 
     const started = await client.request("/api/workspaces", {
@@ -196,7 +210,8 @@ test("workspace API completes initialization and the Server enable wizard", asyn
     assert.equal(instance.agentName, "remote-project");
     assert.equal(instance.server.host, "0.0.0.0");
     assert.equal(instance.server.enabled, false);
-    assert.equal(instance.plugin.installed, true);
+    assert.equal(instance.plugin.configured, true);
+    assert.equal(instance.plugin.available, true);
 
     const enableCheck = await client.request(`/api/instances/${instance.key}/server/enable`, {
       method: "POST",
@@ -217,11 +232,12 @@ test("workspace API completes initialization and the Server enable wizard", asyn
       body: JSON.stringify({ previewId: enable.body.previewId }),
     });
     assert.equal(applied.body.ok, true);
-    const settings = JSON.parse(readFileSync(join(workspace, ".pi", "agent", "settings.json"), "utf8"));
-    assert.equal(settings.a2a.server.enabled, true);
-    assert.ok(settings.a2a.inboundPeers["local-pi"]);
-    assert.equal(settings.a2a.peers.remote.url, "http://remote:9910");
-    const env = readFileSync(join(workspace, ".pi", "agent", ".env.local"), "utf8");
+    const settings = JSON.parse(readFileSync(join(client.agentDir, "settings.json"), "utf8"));
+    const profile = settings.a2a.profiles[instance.workspace];
+    assert.equal(profile.server.enabled, true);
+    assert.ok(profile.inboundPeers["local-pi"]);
+    assert.equal(profile.peers.remote.url, "http://remote:9910");
+    const env = readFileSync(join(client.agentDir, ".env.local"), "utf8");
     assert.match(env, /local-pi/);
     assert.match(env, /remote-token/);
   } finally {
@@ -251,11 +267,12 @@ test("outgoing connections can be edited, renamed, and deleted", async () => {
     });
     const editApply = await client.request("/api/config/apply", { method: "POST", body: JSON.stringify({ previewId: edited.body.previewId }) });
     assert.equal(editApply.body.ok, true);
-    const settingsPath = join(workspace, ".pi", "agent", "settings.json");
-    const envPath = join(workspace, ".pi", "agent", ".env.local");
+    const settingsPath = join(client.agentDir, "settings.json");
+    const envPath = join(client.agentDir, ".env.local");
     const afterEdit = JSON.parse(readFileSync(settingsPath, "utf8"));
-    assert.equal(afterEdit.a2a.peers.old, undefined);
-    assert.deepEqual(afterEdit.a2a.peers.new, { url: "http://new:9920/a2a/v1" });
+    const profilePath = operation.result.instance.workspace;
+    assert.equal(afterEdit.a2a.profiles[profilePath].peers.old, undefined);
+    assert.deepEqual(afterEdit.a2a.profiles[profilePath].peers.new, { url: "http://new:9920/a2a/v1" });
     assert.doesNotMatch(readFileSync(envPath, "utf8"), /old-token|"old"/);
     assert.match(readFileSync(envPath, "utf8"), /new-token/);
 
@@ -265,7 +282,7 @@ test("outgoing connections can be edited, renamed, and deleted", async () => {
     });
     const removeApply = await client.request("/api/config/apply", { method: "POST", body: JSON.stringify({ previewId: removed.body.previewId }) });
     assert.equal(removeApply.body.ok, true);
-    assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).a2a.peers.new, undefined);
+    assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).a2a.profiles[profilePath].peers.new, undefined);
     assert.doesNotMatch(readFileSync(envPath, "utf8"), /new-token|"new"/);
   } finally {
     client.stop();
@@ -364,7 +381,7 @@ test("apply rejects external changes made after preview", async () => {
     const started = await client.request("/api/workspaces", { method: "POST", body: JSON.stringify({ path: workspace }) });
     const operation = await waitForOperation(client, started.body.id);
     assert.equal(operation.status, "complete");
-    const settingsPath = join(workspace, ".pi", "agent", "settings.json");
+    const settingsPath = join(client.agentDir, "settings.json");
     const preview = await client.request("/api/config/preview", {
       method: "POST",
       body: JSON.stringify({ workspace, draft: { server: { port: 12000 } } }),

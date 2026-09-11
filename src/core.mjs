@@ -23,6 +23,7 @@ const execFile = promisify(execFileCallback);
 export const BASE_PORT = 9910;
 export const DEFAULT_HOST = "0.0.0.0";
 export const PORT_FALLBACK = 10;
+export const DEFAULT_AGENT_DIR = process.env.A2A_CONFIG_AGENT_DIR || join(homedir(), ".pi", "agent");
 export const STATE_FILE = process.env.A2A_CONFIG_STATE_FILE || (
   process.platform === "darwin"
     ? join(homedir(), "Library", "Application Support", "a2a-config", "state.json")
@@ -41,6 +42,10 @@ export function workspaceKey(workspacePath) {
   return hashText(workspacePath).slice(0, 16);
 }
 
+export function instanceKey(agentDir, workspacePath) {
+  return hashText(`${resolve(agentDir)}\0${resolve(workspacePath)}`).slice(0, 16);
+}
+
 export function normalizeWorkspacePath(input) {
   const candidate = resolve(String(input || ""));
   if (!existsSync(candidate)) throw new Error("工作目录不存在");
@@ -48,10 +53,10 @@ export function normalizeWorkspacePath(input) {
   return realpathSync(candidate);
 }
 
-export function pathsForWorkspace(workspacePath) {
+export function pathsForWorkspace(workspacePath, agentDirInput = DEFAULT_AGENT_DIR) {
   const workspace = normalizeWorkspacePath(workspacePath);
   const projectDir = join(workspace, ".pi");
-  const agentDir = join(projectDir, "agent");
+  const agentDir = resolve(agentDirInput);
   return {
     workspace,
     projectDir,
@@ -80,11 +85,11 @@ export function readJsonFile(path, { required = false } = {}) {
 }
 
 export function readState(path = STATE_FILE) {
-  return readAppState(path).workspaces;
+  return [DEFAULT_AGENT_DIR, ...readAppState(path).manualAgentDirs].filter((entry, index, values) => values.indexOf(entry) === index);
 }
 
 export function readAppState(path = STATE_FILE) {
-  if (!existsSync(path)) return { version: 3, workspaces: [], fileWorkspaces: [] };
+  if (!existsSync(path)) return { version: 4, manualAgentDirs: [], legacyWorkspaces: [], migratedLegacyWorkspaces: [], fileWorkspaces: [] };
   let value;
   try {
     value = JSON.parse(readFileSync(path, "utf8"));
@@ -93,8 +98,13 @@ export function readAppState(path = STATE_FILE) {
   }
   if (!isRecord(value)) throw new Error("A2A Config 状态文件必须包含 JSON object");
   return {
-    version: 3,
-    workspaces: Array.isArray(value.workspaces) ? value.workspaces.filter((entry) => typeof entry === "string") : [],
+    version: 4,
+    manualAgentDirs: Array.isArray(value.manualAgentDirs) ? value.manualAgentDirs.filter((entry) => typeof entry === "string") : [],
+    legacyWorkspaces: [
+      ...(Array.isArray(value.legacyWorkspaces) ? value.legacyWorkspaces : []),
+      ...(Array.isArray(value.workspaces) ? value.workspaces : []),
+    ].filter((entry) => typeof entry === "string"),
+    migratedLegacyWorkspaces: Array.isArray(value.migratedLegacyWorkspaces) ? value.migratedLegacyWorkspaces.filter((entry) => typeof entry === "string") : [],
     fileWorkspaces: Array.isArray(value.fileWorkspaces) ? value.fileWorkspaces.filter(isRecord) : [],
   };
 }
@@ -102,8 +112,10 @@ export function readAppState(path = STATE_FILE) {
 export function writeAppState(state, path = STATE_FILE) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeAtomically(path, `${JSON.stringify({
-    version: 3,
-    workspaces: [...new Set(state.workspaces || [])],
+    version: 4,
+    manualAgentDirs: [...new Set(state.manualAgentDirs || [])],
+    legacyWorkspaces: [...new Set(state.legacyWorkspaces || [])],
+    migratedLegacyWorkspaces: [...new Set(state.migratedLegacyWorkspaces || [])],
     fileWorkspaces: Array.isArray(state.fileWorkspaces) ? state.fileWorkspaces : [],
   }, null, 2)}\n`, 0o600);
 }
@@ -121,23 +133,15 @@ export function updateAppState(update, path = STATE_FILE) {
   }
 }
 
-export function writeState(workspaces, path = STATE_FILE) {
-  const normalized = [...new Set(workspaces.map((entry) => {
-    try { return normalizeWorkspacePath(entry); }
-    catch { return resolve(entry); }
-  }))];
-  updateAppState((state) => ({ ...state, workspaces: normalized }), path);
-}
-
-export function addWorkspaceToState(workspace, path = STATE_FILE) {
-  const normalized = normalizeWorkspacePath(workspace);
-  writeState([...readState(path), normalized], path);
+export function addAgentDirToState(agentDir, path = STATE_FILE) {
+  const normalized = realpathSync(resolve(agentDir));
+  updateAppState((state) => ({ ...state, manualAgentDirs: [...new Set([...state.manualAgentDirs, normalized])] }), path);
   return normalized;
 }
 
-export function removeWorkspaceFromState(workspace, path = STATE_FILE) {
-  const normalized = resolve(workspace);
-  writeState(readState(path).filter((entry) => resolve(entry) !== normalized), path);
+export function removeAgentDirFromState(agentDir, path = STATE_FILE) {
+  const normalized = resolve(agentDir);
+  updateAppState((state) => ({ ...state, manualAgentDirs: state.manualAgentDirs.filter((entry) => resolve(entry) !== normalized) }), path);
 }
 
 export function normalizeInstanceId(folderName, workspacePath, usedIds = new Set()) {
@@ -237,19 +241,50 @@ function effectiveA2a(settings, workspace) {
   return isRecord(profiles[workspace]) ? mergeObjects(root, profiles[workspace]) : root;
 }
 
-function configurationTarget(settings, workspace) {
-  const a2a = isRecord(settings.a2a) ? settings.a2a : {};
-  const profiles = isRecord(a2a.profiles) ? a2a.profiles : {};
-  return isRecord(profiles[workspace]) ? profiles[workspace] : a2a;
+function sanitizeProjectA2a(value) {
+  if (!isRecord(value)) return {};
+  const result = structuredClone(value);
+  for (const key of ["profiles", "instanceId", "inboundPeers", "workspaces", "session", "trace", "verifySsl"]) delete result[key];
+  if (isRecord(result.server)) {
+    const server = { ...result.server };
+    for (const key of ["enabled", "host", "sharedToken", "peerTokens", "trustedPeers", "allowAllUsers", "publicUrl", "rateLimitPerMinute", "rateLimitPerMin", "maxPingpongTurns", "maxConcurrent", "replyTimeoutMs", "executionTimeoutMs", "defaultWorkspaceId"]) delete server[key];
+    result.server = server;
+  }
+  if (isRecord(result.discovery)) {
+    const discovery = { ...result.discovery };
+    delete discovery.gateway;
+    delete discovery.gateways;
+    delete discovery.enrichCard;
+    if (isRecord(discovery.mdns)) discovery.mdns = { ...discovery.mdns, enabled: undefined };
+    result.discovery = discovery;
+  }
+  return result;
 }
 
-export function hasA2aPlugin(settings) {
+function configurationTarget(settings, workspace) {
+  if (!isRecord(settings.a2a)) settings.a2a = {};
+  if (!isRecord(settings.a2a.profiles)) settings.a2a.profiles = {};
+  if (!isRecord(settings.a2a.profiles[workspace])) settings.a2a.profiles[workspace] = {};
+  return settings.a2a.profiles[workspace];
+}
+
+export function hasA2aPlugin(settings, agentDir = DEFAULT_AGENT_DIR, loaded = false) {
   const sources = [
     ...(Array.isArray(settings.packages) ? settings.packages : []),
     ...(Array.isArray(settings.extensions) ? settings.extensions : []),
   ];
-  const source = sources.find((entry) => /zhangst_a2a-pi|@zhangst\/pi-a2a|(?:^|[/_-])pi-a2a/i.test(JSON.stringify(entry)));
-  return { installed: source !== undefined, source };
+  const entry = sources.find((item) => /zhangst_a2a-pi|@zhangst\/pi-a2a|(?:^|[/_-])pi-a2a/i.test(JSON.stringify(item)));
+  const source = typeof entry === "string" ? entry : isRecord(entry) && typeof entry.source === "string" ? entry.source : undefined;
+  let available = false;
+  if (source) {
+    if (/^(?:\.|\/|[A-Za-z]:[\\/])/.test(source)) available = existsSync(resolve(agentDir, source));
+    else if (source.startsWith("npm:")) {
+      const spec = source.slice(4);
+      const name = spec.startsWith("@") ? spec.split("@").slice(0, 2).join("@").replace(/@$/, "") : spec.split("@")[0];
+      available = existsSync(join(agentDir, "npm", "node_modules", name));
+    } else available = true;
+  }
+  return { configured: source !== undefined, available, loaded, source, installed: source !== undefined };
 }
 
 function isPidAlive(pid) {
@@ -349,12 +384,12 @@ export function buildRuntimeStatuses(instances, runningProcesses) {
   });
 }
 
-export function readWorkspace(workspacePath) {
-  const paths = pathsForWorkspace(workspacePath);
+export function readWorkspace(workspacePath, agentDir = DEFAULT_AGENT_DIR) {
+  const paths = pathsForWorkspace(workspacePath, agentDir);
   const projectSettings = readJsonFile(paths.projectSettingsPath);
   const agentSettings = readJsonFile(paths.settingsPath);
   const settings = agentSettings.value;
-  const a2a = effectiveA2a(settings, paths.workspace);
+  const a2a = mergeObjects(effectiveA2a(settings, paths.workspace), sanitizeProjectA2a(projectSettings.value.a2a));
   const instanceId = typeof a2a.instanceId === "string" ? a2a.instanceId : normalizeInstanceId(basename(paths.workspace), paths.workspace);
   const server = isRecord(a2a.server) ? a2a.server : {};
   const workspaceId = typeof server.defaultWorkspaceId === "string" && server.defaultWorkspaceId
@@ -370,8 +405,10 @@ export function readWorkspace(workspacePath) {
   const inboundPeers = isRecord(a2a.inboundPeers) ? a2a.inboundPeers : {};
   const registry = readRegistry(paths.agentDir).filter((entry) => entry.cwd === paths.workspace);
   const runtime = readRuntimeRegistry(paths.agentDir).filter((entry) => entry.cwd === paths.workspace);
+  const legacySettingsPath = join(paths.workspace, ".pi", "agent", "settings.json");
+  const legacySettings = readJsonFile(legacySettingsPath);
   return {
-    key: workspaceKey(paths.workspace),
+    key: instanceKey(paths.agentDir, paths.workspace),
     workspace: paths.workspace,
     agentDir: paths.agentDir,
     settingsPath: paths.settingsPath,
@@ -380,7 +417,9 @@ export function readWorkspace(workspacePath) {
       exists: projectSettings.exists,
       hasA2a: isRecord(projectSettings.value.a2a),
     },
-    configured: isRecord(settings.a2a),
+    legacyA2aExists: isRecord(legacySettings.value.a2a),
+    legacySettingsPath,
+    configured: isRecord(settings.a2a) && isRecord(settings.a2a.profiles) && isRecord(settings.a2a.profiles[paths.workspace]),
     instanceId,
     agentName: typeof server.agentName === "string" && server.agentName ? server.agentName : basename(paths.workspace),
     server: {
@@ -404,40 +443,58 @@ export function readWorkspace(workspacePath) {
       name,
       token: typeof inboundSecrets[name] === "string" ? inboundSecrets[name] : "",
     })),
-    plugin: hasA2aPlugin(settings),
+    plugin: hasA2aPlugin(settings, paths.agentDir, runtime.length > 0 || registry.length > 0),
     registry,
     runtime,
     actualPort: registry[0]?.port,
     settingsHash: agentSettings.hash,
     envHash: existsSync(paths.envPath) ? hashText(envText) : null,
-    startCommand: `cd ${shellQuote(paths.workspace)} && PI_CODING_AGENT_DIR=${shellQuote(paths.agentDir)} pi`,
+    startCommand: `cd ${shellQuote(paths.workspace)} && pi`,
   };
 }
 
-export function inspectWorkspace(workspacePath, managedWorkspaces = []) {
-  const paths = pathsForWorkspace(workspacePath);
+export function inspectWorkspace(workspacePath, managedInstances = [], agentDir = DEFAULT_AGENT_DIR) {
+  const paths = pathsForWorkspace(workspacePath, agentDir);
   const projectSettings = readJsonFile(paths.projectSettingsPath);
   const agentSettings = readJsonFile(paths.settingsPath);
   if (agentSettings.exists && Object.hasOwn(agentSettings.value, "a2a") && !isRecord(agentSettings.value.a2a)) {
     throw new Error(`${paths.settingsPath} 的 a2a 必须是 object`);
   }
   const usedIds = new Set();
-  for (const managed of managedWorkspaces) {
-    try { usedIds.add(readWorkspace(managed).instanceId); } catch {}
-  }
+  for (const managed of managedInstances) if (managed?.instanceId) usedIds.add(managed.instanceId);
+  const profile = isRecord(agentSettings.value.a2a) && isRecord(agentSettings.value.a2a.profiles)
+    ? agentSettings.value.a2a.profiles[paths.workspace]
+    : undefined;
+  const legacySettingsPath = join(paths.workspace, ".pi", "agent", "settings.json");
   return {
     ...paths,
-    key: workspaceKey(paths.workspace),
+    key: instanceKey(paths.agentDir, paths.workspace),
     folderName: basename(paths.workspace),
     piExists: existsSync(paths.projectDir),
     projectSettingsExists: projectSettings.exists,
     agentSettingsExists: agentSettings.exists,
-    existingA2a: isRecord(agentSettings.value.a2a),
+    existingA2a: isRecord(profile),
+    legacyA2aExists: (() => { try { return isRecord(readJsonFile(legacySettingsPath).value.a2a); } catch { return false; } })(),
+    legacySettingsPath,
     projectA2aExists: isRecord(projectSettings.value.a2a),
     instanceId: normalizeInstanceId(basename(paths.workspace), paths.workspace, usedIds),
     agentName: basename(paths.workspace),
-    plugin: hasA2aPlugin(agentSettings.value),
+    plugin: hasA2aPlugin(agentSettings.value, paths.agentDir),
   };
+}
+
+export function readAgentDirectories(agentDirs = [DEFAULT_AGENT_DIR]) {
+  const instances = [];
+  for (const agentDirInput of agentDirs) {
+    const agentDir = resolve(agentDirInput);
+    const settings = readJsonFile(join(agentDir, "settings.json"));
+    const profiles = isRecord(settings.value.a2a) && isRecord(settings.value.a2a.profiles) ? settings.value.a2a.profiles : {};
+    for (const workspace of Object.keys(profiles)) {
+      try { instances.push(readWorkspace(workspace, agentDir)); }
+      catch (error) { instances.push({ key: instanceKey(agentDir, workspace), workspace, agentDir, error: error instanceof Error ? error.message : String(error) }); }
+    }
+  }
+  return instances;
 }
 
 export function buildInitialA2a({ workspace, instanceId, agentName, port }) {
@@ -561,32 +618,26 @@ export async function buildPortStatus(instances, probe = probePort) {
 
 export async function initializeWorkspace({
   workspacePath,
-  managedWorkspaces,
   instances,
-  pluginSource,
-  piExecutable,
+  agentDir = DEFAULT_AGENT_DIR,
   onStage = () => {},
-  runInstall = installPlugin,
-  stateFile = STATE_FILE,
   probe = probePort,
 }) {
   onStage("inspect");
-  const inspection = inspectWorkspace(workspacePath, managedWorkspaces);
-  onStage("create");
+  const inspection = inspectWorkspace(workspacePath, instances, agentDir);
+  onStage("configure");
   mkdirSync(inspection.agentDir, { recursive: true, mode: 0o700 });
-  mkdirSync(join(inspection.agentDir, "sessions"), { recursive: true, mode: 0o700 });
   let settings = readJsonFile(inspection.settingsPath);
   if (!settings.exists) {
     writeAtomically(inspection.settingsPath, "{}\n", 0o600);
     settings = readJsonFile(inspection.settingsPath, { required: true });
   }
-  addWorkspaceToState(inspection.workspace, stateFile);
-
   let a2aCreated = false;
-  if (!Object.hasOwn(settings.value, "a2a")) {
-    onStage("configure");
+  if (!inspection.existingA2a) {
     const port = await choosePort(instances, BASE_PORT, probe);
-    settings.value.a2a = buildInitialA2a({
+    if (!isRecord(settings.value.a2a)) settings.value.a2a = {};
+    if (!isRecord(settings.value.a2a.profiles)) settings.value.a2a.profiles = {};
+    settings.value.a2a.profiles[inspection.workspace] = buildInitialA2a({
       workspace: inspection.workspace,
       instanceId: inspection.instanceId,
       agentName: inspection.agentName,
@@ -596,50 +647,15 @@ export async function initializeWorkspace({
     a2aCreated = true;
   }
 
-  const configured = readJsonFile(inspection.settingsPath, { required: true });
-  let plugin = hasA2aPlugin(configured.value);
-  let install;
-  if (!plugin.installed) {
-    onStage("install");
-    if (!pluginSource) throw new Error("找不到 A2A 插件来源，无法自动安装");
-    if (!piExecutable) throw new Error("找不到 pi 可执行文件，无法自动安装 A2A 插件");
-    try {
-      install = await runInstall({ piExecutable, pluginSource, workspace: inspection.workspace, agentDir: inspection.agentDir });
-    } catch (error) {
-      const command = `cd ${shellQuote(inspection.workspace)} && PI_CODING_AGENT_DIR=${shellQuote(inspection.agentDir)} ${shellQuote(piExecutable)} install ${shellQuote(pluginSource)}`;
-      const wrapped = new Error(`A2A 插件安装失败：${error instanceof Error ? error.message : String(error)}`);
-      wrapped.retryCommand = command;
-      wrapped.workspace = inspection.workspace;
-      wrapped.a2aCreated = a2aCreated;
-      throw wrapped;
-    }
-    plugin = hasA2aPlugin(readJsonFile(inspection.settingsPath, { required: true }).value);
-    if (!plugin.installed) throw new Error("pi install 已结束，但专属 settings.json 中仍未检测到 A2A 插件");
-  }
   onStage("complete");
   return {
     inspection,
-    instance: readWorkspace(inspection.workspace),
+    instance: readWorkspace(inspection.workspace, inspection.agentDir),
     a2aCreated,
     a2aPreserved: inspection.existingA2a,
     projectSettingsPreserved: inspection.projectSettingsPath,
-    plugin,
-    install,
+    plugin: hasA2aPlugin(readJsonFile(inspection.settingsPath, { required: true }).value, inspection.agentDir),
   };
-}
-
-export async function installPlugin({ piExecutable, pluginSource, workspace, agentDir }) {
-  const javascriptCli = isJavaScriptCli(piExecutable);
-  const nodePath = process.env.A2A_CONFIG_NODE || process.execPath;
-  const command = javascriptCli ? nodePath : piExecutable;
-  const args = javascriptCli ? [piExecutable, "install", pluginSource] : ["install", pluginSource];
-  const { stdout, stderr } = await execFile(command, args, {
-    cwd: workspace,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: process.versions.electron ? "1" : process.env.ELECTRON_RUN_AS_NODE, PI_CODING_AGENT_DIR: agentDir },
-    timeout: 300_000,
-    maxBuffer: 2 * 1024 * 1024,
-  });
-  return { stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
 export function findPiInstallations() {
@@ -688,12 +704,6 @@ function isJavaScriptCli(candidate) {
   catch { return candidate.endsWith(".js"); }
 }
 
-export function resolvePluginSource(appRoot, cliSource) {
-  if (cliSource) return cliSource;
-  if (process.env.A2A_CONFIG_PLUGIN_SOURCE) return process.env.A2A_CONFIG_PLUGIN_SOURCE;
-  const local = resolve(appRoot, "..", "..", "pi_extensions", "zhangst_a2a-pi");
-  return existsSync(local) ? local : undefined;
-}
 
 export function applyWorkspaceDraft(settings, workspace, draft) {
   const next = structuredClone(settings);
