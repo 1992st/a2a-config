@@ -629,7 +629,9 @@ export async function initializeWorkspace({
 }
 
 export async function installPlugin({ piExecutable, pluginSource, workspace, agentDir }) {
-  const { stdout, stderr } = await execFile(piExecutable, ["install", pluginSource], {
+  const command = piExecutable.endsWith(".js") ? process.execPath : piExecutable;
+  const args = piExecutable.endsWith(".js") ? [piExecutable, "install", pluginSource] : ["install", pluginSource];
+  const { stdout, stderr } = await execFile(command, args, {
     cwd: workspace,
     env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
     timeout: 300_000,
@@ -649,7 +651,9 @@ export function findPiInstallations() {
       seen.add(realPath);
       let version;
       try {
-        version = execFileSync(path, ["--version"], { encoding: "utf8", timeout: 1500, stdio: ["ignore", "pipe", "ignore"] }).trim();
+        const command = path.endsWith(".js") ? process.execPath : path;
+        const args = path.endsWith(".js") ? [path, "--version"] : ["--version"];
+        version = execFileSync(command, args, { encoding: "utf8", timeout: 1500, stdio: ["ignore", "pipe", "ignore"] }).trim();
       } catch {}
       found.push({ executablePath: path, realPath, source, version });
     } catch {}
