@@ -17,13 +17,15 @@ const state = {
 };
 
 const $ = (selector) => document.querySelector(selector);
+const BASE_PATH = document.querySelector('meta[name="a2a-config-base-path"]')?.content || "";
+const apiPath = (path) => `${BASE_PATH}${path}`;
 const refreshIcons = () => window.lucide?.createIcons({ attrs: { width: 16, height: 16, "stroke-width": 2 } });
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[character]);
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(apiPath(path), {
     ...options,
     headers: { "content-type": "application/json", ...(options.headers || {}) },
   });

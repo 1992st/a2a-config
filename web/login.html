@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>A2A Config 登录</title>
-  <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/file-transfer.css">
+  <meta name="a2a-config-base-path" content="__A2A_CONFIG_BASE_PATH__">
+  <link rel="stylesheet" href="__A2A_CONFIG_BASE_PATH__/styles.css">
+  <link rel="stylesheet" href="__A2A_CONFIG_BASE_PATH__/file-transfer.css">
 </head>
 <body class="login-page">
   <main class="login-main">
@@ -21,8 +22,9 @@
   <script>
     document.querySelector("#login-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const response = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: document.querySelector("#admin-token").value }) });
-      if (response.ok) location.href = "/";
+      const basePath = document.querySelector('meta[name="a2a-config-base-path"]')?.content || "";
+      const response = await fetch(`${basePath}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: document.querySelector("#admin-token").value }) });
+      if (response.ok) location.href = `${basePath}/`;
       else document.querySelector("#login-error").textContent = "管理 Token 不正确";
     });
   </script>

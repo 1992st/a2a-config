@@ -39,6 +39,7 @@ const STATIC_ROOT = join(APP_ROOT, "web");
 const LUCIDE_PATH = join(APP_ROOT, "node_modules", "lucide", "dist", "umd", "lucide.min.js");
 const SESSION_TOKEN = randomBytes(32).toString("hex");
 const ADMIN_TOKEN = process.env.A2A_CONFIG_ADMIN_TOKEN || "";
+const BASE_PATH = normalizeBasePath(process.env.A2A_CONFIG_BASE_PATH || "");
 const operations = new Map();
 const previews = new Map();
 let initializationQueue = Promise.resolve();
@@ -67,6 +68,32 @@ function pluginSourceFromArgs(args = process.argv.slice(2)) {
 const pluginSource = resolvePluginSource(APP_ROOT, pluginSourceFromArgs());
 const piInstallations = findPiInstallations();
 const piExecutable = process.env.A2A_CONFIG_PI || piInstallations[0]?.executablePath;
+
+function normalizeBasePath(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed || trimmed === "/") return "";
+  const normalized = `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
+  if (normalized.includes("//") || normalized.includes("..")) throw new Error("A2A_CONFIG_BASE_PATH 格式无效");
+  return normalized;
+}
+
+function joinBasePath(pathname, basePath = BASE_PATH) {
+  const path = String(pathname || "/");
+  if (!basePath) return path.startsWith("/") ? path : `/${path}`;
+  return `${basePath}${path.startsWith("/") ? path : `/${path}`}`.replace(/\/{2,}/g, "/");
+}
+
+function stripBasePath(pathname, basePath = BASE_PATH) {
+  const path = String(pathname || "/");
+  if (!basePath) return path || "/";
+  if (path === basePath || path === `${basePath}/`) return "/";
+  if (!path.startsWith(`${basePath}/`)) return null;
+  return path.slice(basePath.length) || "/";
+}
+
+function sessionCookie() {
+  return `a2a_config_session=${SESSION_TOKEN}; HttpOnly; SameSite=Strict; Path=${BASE_PATH || "/"}`;
+}
 
 function sendJson(response, status, body) {
   response.writeHead(status, {
@@ -386,15 +413,20 @@ async function verifyConnection(input) {
   };
 }
 
-function serveFile(response, path) {
+function serveFile(response, path, options = {}) {
   const contentTypes = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
   };
   try {
-    response.writeHead(200, { "content-type": contentTypes[extname(path)] || "application/octet-stream", "cache-control": "no-cache" });
-    response.end(readFileSync(path));
+    const type = contentTypes[extname(path)] || "application/octet-stream";
+    let content = readFileSync(path);
+    if (type.startsWith("text/html")) {
+      content = Buffer.from(content.toString("utf8").replaceAll("__A2A_CONFIG_BASE_PATH__", options.basePath ?? BASE_PATH));
+    }
+    response.writeHead(200, { "content-type": type, "cache-control": "no-cache" });
+    response.end(content);
   } catch {
     sendError(response, 404, "NOT_FOUND", "页面不存在");
   }
@@ -417,34 +449,40 @@ function readDirectories(path) {
 
 const httpServer = createServer(async (request, response) => {
   const url = new URL(request.url || "/", "http://127.0.0.1");
-  if (url.pathname === "/" && request.method === "GET") {
-    if (ADMIN_TOKEN && !isLoopbackAddress(request.socket.remoteAddress) && cookieValue(request, "a2a_config_session") !== SESSION_TOKEN) {
-      serveFile(response, join(STATIC_ROOT, "login.html"));
-      return;
-    }
-    response.setHeader("set-cookie", `a2a_config_session=${SESSION_TOKEN}; HttpOnly; SameSite=Strict; Path=/`);
-    serveFile(response, join(STATIC_ROOT, "index.html"));
+  const pathname = stripBasePath(url.pathname);
+  if (pathname === null) {
+    sendError(response, 404, "NOT_FOUND", "页面不存在");
     return;
   }
-  if (url.pathname === "/vendor/lucide.js" && request.method === "GET") {
+  url.pathname = pathname;
+  if (pathname === "/" && request.method === "GET") {
+    if (ADMIN_TOKEN && !isLoopbackAddress(request.socket.remoteAddress) && cookieValue(request, "a2a_config_session") !== SESSION_TOKEN) {
+      serveFile(response, join(STATIC_ROOT, "login.html"), { basePath: BASE_PATH });
+      return;
+    }
+    response.setHeader("set-cookie", sessionCookie());
+    serveFile(response, join(STATIC_ROOT, "index.html"), { basePath: BASE_PATH });
+    return;
+  }
+  if (pathname === "/vendor/lucide.js" && request.method === "GET") {
     serveFile(response, LUCIDE_PATH);
     return;
   }
-  if (url.pathname === "/api/login" && request.method === "POST") {
+  if (pathname === "/api/login" && request.method === "POST") {
     try {
       const body = await readRequestBody(request);
       if (!ADMIN_TOKEN || !tokenMatches(body.token, ADMIN_TOKEN)) {
         sendError(response, 401, "INVALID_TOKEN", "管理 Token 不正确");
         return;
       }
-      response.setHeader("set-cookie", `a2a_config_session=${SESSION_TOKEN}; HttpOnly; SameSite=Strict; Path=/`);
+      response.setHeader("set-cookie", sessionCookie());
       sendJson(response, 200, { ok: true });
     } catch (error) {
       sendError(response, 400, "REQUEST_FAILED", error instanceof Error ? error.message : String(error));
     }
     return;
   }
-  if (url.pathname === "/api/agent/file-workspaces" && request.method === "GET") {
+  if (pathname === "/api/agent/file-workspaces" && request.method === "GET") {
     if (!isLoopbackAddress(request.socket.remoteAddress)) {
       sendError(response, 403, "LOOPBACK_REQUIRED", "Agent 文件空间接口只允许本机访问");
       return;
@@ -457,26 +495,26 @@ const httpServer = createServer(async (request, response) => {
     }
     return;
   }
-  if (url.pathname.startsWith("/api/") && !authenticate(request, response)) return;
+  if (pathname.startsWith("/api/") && !authenticate(request, response)) return;
   try {
-    if (url.pathname === "/api/state" && request.method === "GET") {
+    if (pathname === "/api/state" && request.method === "GET") {
       sendJson(response, 200, await statePayload());
       return;
     }
-    if (url.pathname === "/api/workspaces/inspect" && request.method === "POST") {
+    if (pathname === "/api/workspaces/inspect" && request.method === "POST") {
       const body = await readRequestBody(request);
       const inspection = inspectWorkspace(body.path, readState());
       const suggestedPort = inspection.existingA2a ? readWorkspace(inspection.workspace).server.port : await chooseCandidatePort();
       sendJson(response, 200, { ...inspection, suggestedPort, pluginSource: pluginSource || null, piExecutable: piExecutable || null });
       return;
     }
-    if (url.pathname === "/api/workspaces" && request.method === "POST") {
+    if (pathname === "/api/workspaces" && request.method === "POST") {
       const body = await readRequestBody(request);
       sendJson(response, 202, startWorkspaceInitialization(body.path));
       return;
     }
-    if (url.pathname.startsWith("/api/workspaces/") && request.method === "DELETE") {
-      const key = url.pathname.split("/").at(-1);
+    if (pathname.startsWith("/api/workspaces/") && request.method === "DELETE") {
+      const key = pathname.split("/").at(-1);
       const instance = readManagedInstances().find((entry) => entry.key === key);
       if (!instance) {
         sendError(response, 404, "NOT_FOUND", "工作目录不存在");
@@ -486,8 +524,8 @@ const httpServer = createServer(async (request, response) => {
       sendJson(response, 200, { ok: true });
       return;
     }
-    if (url.pathname.startsWith("/api/operations/") && request.method === "GET") {
-      const operation = operations.get(url.pathname.split("/").at(-1));
+    if (pathname.startsWith("/api/operations/") && request.method === "GET") {
+      const operation = operations.get(pathname.split("/").at(-1));
       if (!operation) {
         sendError(response, 404, "NOT_FOUND", "初始化任务不存在");
         return;
@@ -495,31 +533,31 @@ const httpServer = createServer(async (request, response) => {
       sendJson(response, 200, operationView(operation));
       return;
     }
-    if (url.pathname === "/api/port-status" && request.method === "GET") {
+    if (pathname === "/api/port-status" && request.method === "GET") {
       const instances = readManagedInstances().filter((entry) => !entry.error);
       sendJson(response, 200, await monitorInstances(instances));
       return;
     }
-    if (url.pathname === "/api/file-workspaces" && request.method === "GET") {
+    if (pathname === "/api/file-workspaces" && request.method === "GET") {
       sendJson(response, 200, { fileWorkspaces: fileTransferManager.list(), dependencies: dependencyStatus() });
       return;
     }
-    if (url.pathname === "/api/file-workspaces/inspect" && request.method === "POST") {
+    if (pathname === "/api/file-workspaces/inspect" && request.method === "POST") {
       const body = await readRequestBody(request);
       const instances = readManagedInstances().filter((instance) => !instance.error);
       sendJson(response, 200, await fileTransferManager.inspect(body.root, instances, instances));
       return;
     }
-    if (url.pathname === "/api/file-workspaces" && request.method === "POST") {
+    if (pathname === "/api/file-workspaces" && request.method === "POST") {
       const instances = readManagedInstances().filter((instance) => !instance.error);
       sendJson(response, 201, await fileTransferManager.create(await readRequestBody(request), instances, instances));
       return;
     }
-    if (url.pathname === "/api/file-workspaces/status" && request.method === "GET") {
+    if (pathname === "/api/file-workspaces/status" && request.method === "GET") {
       sendJson(response, 200, { statuses: await fileTransferManager.monitoredStatuses(), refreshedAt: new Date().toISOString() });
       return;
     }
-    const fileWorkspaceMatch = /^\/api\/file-workspaces\/([^/]+)(?:\/(enable|disable|restart|agents))?$/.exec(url.pathname);
+    const fileWorkspaceMatch = /^\/api\/file-workspaces\/([^/]+)(?:\/(enable|disable|restart|agents))?$/.exec(pathname);
     if (fileWorkspaceMatch) {
       const id = decodeURIComponent(fileWorkspaceMatch[1]);
       const action = fileWorkspaceMatch[2];
@@ -546,15 +584,15 @@ const httpServer = createServer(async (request, response) => {
         return;
       }
     }
-    if (url.pathname === "/api/ports/check" && request.method === "POST") {
+    if (pathname === "/api/ports/check" && request.method === "POST") {
       const body = await readRequestBody(request);
       const port = Number(body.port);
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("端口必须是 1 到 65535 的整数");
       sendJson(response, 200, { host: body.host || "0.0.0.0", port, available: await probePort(body.host || "0.0.0.0", port) });
       return;
     }
-    if (url.pathname.startsWith("/api/instances/") && url.pathname.endsWith("/server/enable") && request.method === "POST") {
-      const key = url.pathname.split("/")[3];
+    if (pathname.startsWith("/api/instances/") && pathname.endsWith("/server/enable") && request.method === "POST") {
+      const key = pathname.split("/")[3];
       const instance = instanceByKey(key);
       if (!instance) throw Object.assign(new Error("实例不存在"), { status: 404, code: "NOT_FOUND" });
       if (!instance.plugin.installed) throw Object.assign(new Error("A2A 插件尚未安装"), { status: 409, code: "PLUGIN_MISSING" });
@@ -577,8 +615,8 @@ const httpServer = createServer(async (request, response) => {
       sendJson(response, 200, { connectionRequired: false, ...createPreview(instance.workspace, draft) });
       return;
     }
-    if (url.pathname.startsWith("/api/instances/") && request.method === "GET") {
-      const instance = instanceByKey(url.pathname.split("/").at(-1));
+    if (pathname.startsWith("/api/instances/") && request.method === "GET") {
+      const instance = instanceByKey(pathname.split("/").at(-1));
       if (!instance) {
         sendError(response, 404, "NOT_FOUND", "实例不存在");
         return;
@@ -586,31 +624,31 @@ const httpServer = createServer(async (request, response) => {
       sendJson(response, 200, instance);
       return;
     }
-    if (url.pathname === "/api/connections/validate" && request.method === "POST") {
+    if (pathname === "/api/connections/validate" && request.method === "POST") {
       sendJson(response, 200, await verifyConnection(await readRequestBody(request)));
       return;
     }
-    if (url.pathname === "/api/config/preview" && request.method === "POST") {
+    if (pathname === "/api/config/preview" && request.method === "POST") {
       const body = await readRequestBody(request);
       sendJson(response, 200, createPreview(body.workspace, isRecord(body.draft) ? body.draft : {}));
       return;
     }
-    if (url.pathname === "/api/config/apply" && request.method === "POST") {
+    if (pathname === "/api/config/apply" && request.method === "POST") {
       const body = await readRequestBody(request);
       sendJson(response, 200, applyPreview(body.previewId));
       return;
     }
-    if (url.pathname === "/api/fs/directories" && request.method === "GET") {
+    if (pathname === "/api/fs/directories" && request.method === "GET") {
       const path = normalizeWorkspacePath(url.searchParams.get("path") || process.cwd());
       sendJson(response, 200, { path, entries: readDirectories(path) });
       return;
     }
-    if (url.pathname.startsWith("/api/")) {
+    if (pathname.startsWith("/api/")) {
       sendError(response, 404, "NOT_FOUND", "接口不存在");
       return;
     }
     if (request.method === "GET") {
-      const relativePath = normalize(url.pathname).replace(/^\/+/, "");
+      const relativePath = normalize(pathname).replace(/^\/+/, "");
       if (relativePath.startsWith("..") || relativePath.includes(`${sep}..${sep}`)) {
         sendError(response, 404, "NOT_FOUND", "页面不存在");
         return;
@@ -649,7 +687,7 @@ export async function stopServer() {
   await new Promise((resolveStop) => httpServer.close(resolveStop));
 }
 
-export { applyPreview, createPreview, fileTransferManager, httpServer, statePayload };
+export { applyPreview, createPreview, fileTransferManager, httpServer, statePayload, BASE_PATH, joinBasePath, normalizeBasePath, stripBasePath };
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   startServer();

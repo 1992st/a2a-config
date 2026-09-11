@@ -23,6 +23,7 @@ import {
   secretName,
   updateSecretText,
 } from "../src/core.mjs";
+import { joinBasePath, normalizeBasePath, stripBasePath } from "../src/server.mjs";
 
 function temporaryWorkspace(name = "project") {
   const root = mkdtempSync(join(tmpdir(), "a2a-config-test-"));
@@ -30,6 +31,14 @@ function temporaryWorkspace(name = "project") {
   mkdirSync(workspace);
   return { root, workspace, stateFile: join(root, "state.json") };
 }
+
+test("normalizes and joins configured base paths", () => {
+  assert.equal(normalizeBasePath(""), "");
+  assert.equal(normalizeBasePath("/a2a-config/"), "/a2a-config");
+  assert.equal(joinBasePath("/api/state", "/a2a-config"), "/a2a-config/api/state");
+  assert.equal(stripBasePath("/a2a-config/api/state", "/a2a-config"), "/api/state");
+  assert.equal(stripBasePath("/other", "/a2a-config"), null);
+});
 
 async function mockInstall({ agentDir, pluginSource }) {
   const settingsPath = join(agentDir, "settings.json");
