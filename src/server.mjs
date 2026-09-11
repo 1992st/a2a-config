@@ -141,6 +141,7 @@ function cookieValue(request, name) {
 }
 
 function authenticate(request, response) {
+  if (PROXY_TOKEN && tokenMatches(request.headers["x-a2a-config-proxy-token"], PROXY_TOKEN)) return true;
   if (cookieValue(request, "a2a_config_session") !== SESSION_TOKEN) {
     sendError(response, 401, "UNAUTHORIZED", "本地会话已失效，请重新打开工具");
     return false;

@@ -139,6 +139,19 @@ test("keeps the embedded session stable across child process restarts", async ()
   }
 });
 
+test("accepts a valid host proxy token even when the iframe sends a stale cookie", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-stale-cookie-"));
+  const client = await startTestServer(root, "/a2a-config", "host-secret");
+  try {
+    const response = await fetch(new URL("a2a-config/api/state", client.baseUrl), {
+      headers: { cookie: "a2a_config_session=stale", "x-a2a-config-proxy-token": "host-secret" }
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    client.stop();
+  }
+});
+
 async function waitForOperation(client, id) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const { body } = await client.request(`/api/operations/${id}`);
