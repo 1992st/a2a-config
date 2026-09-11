@@ -140,6 +140,26 @@ test("requires the host proxy token for embedded management routes", async () =>
   }
 });
 
+test("registers an existing additional system Agent directory without modifying it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-agent-dir-"));
+  const extra = join(root, "extra-agent");
+  mkdirSync(extra);
+  const original = '{"theme":"dark","packages":[]}\n';
+  writeFileSync(join(extra, "settings.json"), original);
+  const client = await startTestServer(root);
+  try {
+    const inspected = await client.request("/api/agent-dirs/inspect", { method: "POST", body: JSON.stringify({ path: extra }) });
+    assert.equal(inspected.response.status, 200);
+    const registered = await client.request("/api/agent-dirs", { method: "POST", body: JSON.stringify({ path: extra }) });
+    assert.equal(registered.response.status, 201);
+    const state = await client.request("/api/state");
+    assert.ok(state.body.agentDirs.includes(registered.body.agentDir));
+    assert.equal(readFileSync(join(extra, "settings.json"), "utf8"), original);
+  } finally {
+    client.stop();
+  }
+});
+
 test("keeps the embedded session stable across child process restarts", async () => {
   const root = mkdtempSync(join(tmpdir(), "a2a-config-stable-session-"));
   const first = await startTestServer(root, "/a2a-config", "host-secret");

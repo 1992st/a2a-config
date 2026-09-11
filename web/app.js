@@ -211,6 +211,7 @@ function render() {
   $("#module-agents").classList.toggle("active", state.module === "agents");
   $("#module-files").classList.toggle("active", state.module === "files");
   $("#add-workspace").classList.toggle("hidden", state.module !== "agents");
+  $("#add-agent-dir").classList.toggle("hidden", state.module !== "agents");
   $("#add-file-workspace").classList.toggle("hidden", state.module !== "files");
   $("#open-nav").setAttribute("aria-label", state.module === "agents" ? "打开工作目录列表" : "打开文件空间列表");
   $(".sidebar-title").textContent = state.module === "agents" ? "工作目录" : "文件空间";
@@ -594,6 +595,23 @@ function closeNavigation() {
 }
 
 $("#add-workspace").addEventListener("click", openWorkspaceDialog);
+$("#add-agent-dir").addEventListener("click", () => {
+  $("#agent-dir-path").value = "";
+  $("#agent-dir-dialog").showModal();
+});
+$("#agent-dir-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const inspected = await api("/api/agent-dirs/inspect", { method: "POST", body: JSON.stringify({ path: $("#agent-dir-path").value }) });
+    await api("/api/agent-dirs", { method: "POST", body: JSON.stringify({ path: inspected.agentDir }) });
+    $("#agent-dir-dialog").close();
+    await loadState();
+    notify("Agent 配置目录已登记");
+  } catch (error) { notify(error.message); }
+  finally { button.disabled = false; }
+});
 $("#add-file-workspace").addEventListener("click", openFileWorkspaceDialog);
 $("#module-agents").addEventListener("click", () => { state.module = "agents"; closeNavigation(); render(); });
 $("#module-files").addEventListener("click", () => { state.module = "files"; closeNavigation(); render(); });

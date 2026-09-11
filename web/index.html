@@ -19,7 +19,7 @@
       <div class="header-actions">
         <span id="refreshed-at"></span>
         <button class="button" id="refresh" type="button"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
-        <button class="button primary header-create" id="add-workspace" type="button" title="添加工作目录"><i data-lucide="plus"></i><span>添加工作目录</span></button><button class="button primary header-create hidden" id="add-file-workspace" type="button" title="创建文件空间"><i data-lucide="plus"></i><span>创建文件空间</span></button>
+        <button class="button header-create" id="add-agent-dir" type="button" title="登记其他系统 Agent 配置目录"><i data-lucide="folder-cog"></i><span>Agent 配置目录</span></button><button class="button primary header-create" id="add-workspace" type="button" title="添加工作目录"><i data-lucide="plus"></i><span>添加工作目录</span></button><button class="button primary header-create hidden" id="add-file-workspace" type="button" title="创建文件空间"><i data-lucide="plus"></i><span>创建文件空间</span></button>
       </div>
     </header>
     <button class="nav-scrim" id="nav-scrim" type="button" aria-label="关闭工作目录列表"></button>
@@ -36,6 +36,14 @@
       <header class="dialog-header"><div><h2>添加工作目录</h2><p>只需要提供一个目录，其他配置自动完成。</p></div><button class="icon-button" data-close type="button" aria-label="关闭">×</button></header>
       <div class="dialog-body"><label for="workspace-path">工作目录</label><input class="control mono" id="workspace-path" required placeholder="/path/to/project"><div class="inspection hidden" id="workspace-inspection"></div><div class="operation hidden" id="workspace-operation"></div></div>
       <footer class="dialog-footer"><button class="button" data-close type="button">取消</button><button class="button primary" id="workspace-submit" type="submit">检查目录</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="agent-dir-dialog">
+    <form class="dialog-shell" id="agent-dir-form">
+      <header class="dialog-header"><div><h2>登记 Agent 配置目录</h2><p>选择已有且包含 settings.json 的 Pi Agent 配置目录。</p></div><button class="icon-button" data-close type="button" aria-label="关闭">×</button></header>
+      <div class="dialog-body"><label for="agent-dir-path">Agent 配置目录</label><input class="control mono" id="agent-dir-path" required placeholder="~/.pi/agent"></div>
+      <footer class="dialog-footer"><button class="button" data-close type="button">取消</button><button class="button primary" type="submit">登记目录</button></footer>
     </form>
   </dialog>
 

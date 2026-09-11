@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   acquireLocks,
+  addAgentDirToState,
   applyWorkspaceDraft,
   buildPortStatus,
   buildRuntimeStatuses,
@@ -15,6 +16,7 @@ import {
   findPiInstallations,
   findRunningPiProcesses,
   hashText,
+  hasA2aPlugin,
   initializeWorkspace,
   inspectWorkspace,
   isRecord,
@@ -25,6 +27,7 @@ import {
   readJsonFile,
   readState,
   readWorkspace,
+  removeAgentDirFromState,
   renameSecretText,
   secretName,
   secretUpdateFromDraft,
@@ -547,6 +550,30 @@ const httpServer = createServer(async (request, response) => {
       const inspection = inspectWorkspace(body.path, instances);
       const suggestedPort = inspection.existingA2a ? readWorkspace(inspection.workspace, inspection.agentDir).server.port : await chooseCandidatePort();
       sendJson(response, 200, { ...inspection, suggestedPort });
+      return;
+    }
+    if (pathname === "/api/agent-dirs/inspect" && request.method === "POST") {
+      const body = await readRequestBody(request);
+      const agentDir = realpathSync(resolve(String(body.path || "")));
+      if (!statSync(agentDir).isDirectory()) throw new Error("Agent 配置路径不是目录");
+      const settings = readJsonFile(join(agentDir, "settings.json"), { required: true });
+      sendJson(response, 200, { agentDir, plugin: hasA2aPlugin(settings.value, agentDir) });
+      return;
+    }
+    if (pathname === "/api/agent-dirs" && request.method === "POST") {
+      const body = await readRequestBody(request);
+      const agentDir = realpathSync(resolve(String(body.path || "")));
+      readJsonFile(join(agentDir, "settings.json"), { required: true });
+      addAgentDirToState(agentDir);
+      sendJson(response, 201, { agentDir });
+      return;
+    }
+    if (pathname.startsWith("/api/agent-dirs/") && request.method === "DELETE") {
+      const key = decodeURIComponent(pathname.slice("/api/agent-dirs/".length));
+      const agentDir = readState().find((entry) => hashText(entry).slice(0, 16) === key);
+      if (!agentDir || agentDir === readState()[0]) throw Object.assign(new Error("默认 Agent 配置目录不能移除"), { status: 409, code: "DEFAULT_AGENT_DIR" });
+      removeAgentDirFromState(agentDir);
+      sendJson(response, 200, { ok: true });
       return;
     }
     if (pathname === "/api/workspaces" && request.method === "POST") {
