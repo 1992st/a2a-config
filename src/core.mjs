@@ -629,7 +629,8 @@ export async function initializeWorkspace({
 }
 
 export async function installPlugin({ piExecutable, pluginSource, workspace, agentDir }) {
-  const command = piExecutable.endsWith(".js") ? process.execPath : piExecutable;
+  const nodePath = process.env.A2A_CONFIG_NODE || process.execPath;
+  const command = piExecutable.endsWith(".js") ? nodePath : piExecutable;
   const args = piExecutable.endsWith(".js") ? [piExecutable, "install", pluginSource] : ["install", pluginSource];
   const { stdout, stderr } = await execFile(command, args, {
     cwd: workspace,
@@ -651,9 +652,10 @@ export function findPiInstallations() {
       seen.add(realPath);
       let version;
       try {
-        const command = path.endsWith(".js") ? process.execPath : path;
+        const nodePath = process.env.A2A_CONFIG_NODE || process.execPath;
+        const command = path.endsWith(".js") ? nodePath : path;
         const args = path.endsWith(".js") ? [path, "--version"] : ["--version"];
-        version = execFileSync(command, args, { encoding: "utf8", timeout: 1500, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, ELECTRON_RUN_AS_NODE: process.versions.electron ? "1" : process.env.ELECTRON_RUN_AS_NODE } }).trim();
+        version = execFileSync(command, args, { encoding: "utf8", timeout: 1500, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, ELECTRON_RUN_AS_NODE: process.env.A2A_CONFIG_NODE ? undefined : process.versions.electron ? "1" : process.env.ELECTRON_RUN_AS_NODE } }).trim();
       } catch {}
       found.push({ executablePath: path, realPath, source, version });
     } catch {}
