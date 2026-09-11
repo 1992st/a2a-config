@@ -126,6 +126,19 @@ test("requires the host proxy token for embedded management routes", async () =>
   }
 });
 
+test("keeps the embedded session stable across child process restarts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-stable-session-"));
+  const first = await startTestServer(root, "/a2a-config", "host-secret");
+  const firstCookie = first.cookie;
+  first.stop();
+  const second = await startTestServer(root, "/a2a-config", "host-secret");
+  try {
+    assert.equal(second.cookie, firstCookie);
+  } finally {
+    second.stop();
+  }
+});
+
 async function waitForOperation(client, id) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const { body } = await client.request(`/api/operations/${id}`);
