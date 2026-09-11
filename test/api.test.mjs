@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 
-async function startTestServer(root, basePath = "") {
+async function startTestServer(root, basePath = "", proxyToken = "") {
   const fakePi = join(root, "fake-pi.mjs");
   writeFileSync(fakePi, `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
@@ -50,6 +50,7 @@ else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh
       OPENAI_API_KEY: "must-not-reach-rclone",
       A2A_CONFIG_ADMIN_TOKEN: "must-not-reach-rclone",
       A2A_CONFIG_BASE_PATH: basePath,
+      A2A_CONFIG_PROXY_TOKEN: proxyToken,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -68,7 +69,7 @@ else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh
     });
     server.once("exit", (code) => reject(new Error(`server exited ${code}: ${stderr}`)));
   });
-  const rootResponse = await fetch(new URL(`${basePath}/`.replace(/^\//, ""), baseUrl));
+  const rootResponse = await fetch(new URL(`${basePath}/`.replace(/^\//, ""), baseUrl), { headers: proxyToken ? { "x-a2a-config-proxy-token": proxyToken } : {} });
   const cookie = rootResponse.headers.get("set-cookie")?.split(";")[0];
   return {
     baseUrl,
@@ -81,6 +82,7 @@ else { writeFileSync(output, "private-key"); writeFileSync(output + ".pub", "ssh
           cookie,
           origin: baseUrl.replace(/\/$/, ""),
           "content-type": "application/json",
+          ...(proxyToken ? { "x-a2a-config-proxy-token": proxyToken } : {}),
           ...(options.headers || {}),
         },
       });
@@ -104,6 +106,19 @@ test("serves the complete application under a configured base path", async () =>
     assert.match(page.headers.get("set-cookie") || "", /Path=\/a2a-config/);
     assert.equal((await fetch(new URL("a2a-config/styles.css", client.baseUrl))).status, 200);
     assert.equal((await fetch(new URL("a2a-config/app.js", client.baseUrl))).status, 200);
+    const state = await client.request("/api/state");
+    assert.equal(state.response.status, 200);
+  } finally {
+    client.stop();
+  }
+});
+
+test("requires the host proxy token for embedded management routes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-proxy-token-"));
+  const client = await startTestServer(root, "/a2a-config", "host-secret");
+  try {
+    const direct = await fetch(new URL("a2a-config/", client.baseUrl));
+    assert.equal(direct.status, 403);
     const state = await client.request("/api/state");
     assert.equal(state.response.status, 200);
   } finally {

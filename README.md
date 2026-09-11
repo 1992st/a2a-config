@@ -31,6 +31,8 @@ A2A_CONFIG_PLUGIN_SOURCE=/path/to/zhangst_a2a-pi
 A2A_CONFIG_BASE_PATH=/a2a-config node src/server.mjs
 ```
 
+宿主应用还可设置随机的 `A2A_CONFIG_PROXY_TOKEN`，并在代理请求中发送 `X-A2A-Config-Proxy-Token`。启用后管理页面与管理 API 只接受经过宿主代理的请求；本机 Agent 文件空间查询接口保持 loopback 可用。
+
 ## 添加工作目录
 
 工具只要求一个工作目录，并使用以下结构：

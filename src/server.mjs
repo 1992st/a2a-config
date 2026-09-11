@@ -39,6 +39,7 @@ const STATIC_ROOT = join(APP_ROOT, "web");
 const LUCIDE_PATH = join(APP_ROOT, "node_modules", "lucide", "dist", "umd", "lucide.min.js");
 const SESSION_TOKEN = randomBytes(32).toString("hex");
 const ADMIN_TOKEN = process.env.A2A_CONFIG_ADMIN_TOKEN || "";
+const PROXY_TOKEN = process.env.A2A_CONFIG_PROXY_TOKEN || "";
 const BASE_PATH = normalizeBasePath(process.env.A2A_CONFIG_BASE_PATH || "");
 const operations = new Map();
 const previews = new Map();
@@ -455,6 +456,10 @@ const httpServer = createServer(async (request, response) => {
     return;
   }
   url.pathname = pathname;
+  if (PROXY_TOKEN && pathname !== "/api/agent/file-workspaces" && !tokenMatches(request.headers["x-a2a-config-proxy-token"], PROXY_TOKEN)) {
+    sendError(response, 403, "PROXY_REQUIRED", "管理页面只能通过宿主应用访问");
+    return;
+  }
   if (pathname === "/" && request.method === "GET") {
     if (ADMIN_TOKEN && !isLoopbackAddress(request.socket.remoteAddress) && cookieValue(request, "a2a_config_session") !== SESSION_TOKEN) {
       serveFile(response, join(STATIC_ROOT, "login.html"), { basePath: BASE_PATH });
