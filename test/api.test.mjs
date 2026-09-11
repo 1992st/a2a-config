@@ -399,3 +399,33 @@ test("apply rejects external changes made after preview", async () => {
     client.stop();
   }
 });
+
+test("legacy workspace configuration migrates only after preview and preserves source files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "a2a-config-legacy-"));
+  const workspace = join(root, "project");
+  const legacyAgentDir = join(workspace, ".pi", "agent");
+  mkdirSync(legacyAgentDir, { recursive: true });
+  const legacySettingsPath = join(legacyAgentDir, "settings.json");
+  const legacyText = JSON.stringify({ a2a: { instanceId: "legacy", custom: { keep: true }, server: { enabled: false, port: 12000 } } }, null, 2);
+  writeFileSync(legacySettingsPath, legacyText);
+  writeFileSync(join(legacyAgentDir, ".env.local"), "PI_A2A_LEGACY='{\"server\":{\"peerTokens\":{\"remote\":\"secret\"}}}'\n");
+  const client = await startTestServer(root);
+  try {
+    const started = await client.request("/api/workspaces", { method: "POST", body: JSON.stringify({ path: workspace }) });
+    const operation = await waitForOperation(client, started.body.id);
+    const profilePath = operation.result.instance.workspace;
+    const migration = await client.request("/api/migrations/legacy/preview", { method: "POST", body: JSON.stringify({ workspace }) });
+    assert.equal(migration.response.status, 200);
+    assert.equal(JSON.parse(readFileSync(join(client.agentDir, "settings.json"), "utf8")).a2a.profiles[profilePath].custom, undefined);
+    const applied = await client.request("/api/config/apply", { method: "POST", body: JSON.stringify({ previewId: migration.body.previewId }) });
+    assert.equal(applied.response.status, 200);
+    const profile = JSON.parse(readFileSync(join(client.agentDir, "settings.json"), "utf8")).a2a.profiles[profilePath];
+    assert.deepEqual(profile.custom, { keep: true });
+    assert.match(readFileSync(join(client.agentDir, ".env.local"), "utf8"), /secret/);
+    assert.equal(readFileSync(legacySettingsPath, "utf8"), legacyText);
+    const state = await client.request("/api/state");
+    assert.equal(state.body.workspaces[0].legacyA2aExists, false);
+  } finally {
+    client.stop();
+  }
+});
